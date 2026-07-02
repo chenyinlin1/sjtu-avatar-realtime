@@ -63,8 +63,6 @@ iic/SenseVoiceSmall/*.pt
 iic/SenseVoiceSmall/*.pth
 iic/SenseVoiceSmall/*.bin
 iic/SenseVoiceSmall/*.safetensors
-node_modules/
-node_modules/
 src/service/frontend_service/frontend/node_modules/
 *.pt
 *.pth

@@ -163,6 +163,9 @@ class HandlerAvatarFlashHead(HandlerBase):
         self.infer_params: Optional[dict] = None
         self.output_data_definitions: Dict[ChatDataType, DataBundleDefinition] = {}
         self._handler_config: Optional[FlashHeadConfig] = None
+        self._flashhead_algo_path: Optional[str] = None
+        self._condition_image_path: Optional[str] = None
+        self._condition_image_lock = threading.RLock()
 
     def get_handler_info(self) -> HandlerBaseInfo:
         return HandlerBaseInfo(
@@ -207,6 +210,7 @@ class HandlerAvatarFlashHead(HandlerBase):
 
         # --- Add SoulX-FlashHead to Python path ---
         flashhead_algo_path = os.path.join(self.handler_root, "SoulX-FlashHead")
+        self._flashhead_algo_path = flashhead_algo_path
         if flashhead_algo_path not in sys.path:
             sys.path.insert(0, flashhead_algo_path)
             logger.info(f"Added FlashHead algo path to sys.path: {flashhead_algo_path}")
@@ -266,6 +270,7 @@ class HandlerAvatarFlashHead(HandlerBase):
                 base_seed=handler_config.base_seed,
                 use_face_crop=False,
             )
+            self._condition_image_path = cond_image_path
 
             # Suppress per-step print() noise from generate() —
             # the pipeline gates those logs behind `if self.rank == 0`.
@@ -284,6 +289,63 @@ class HandlerAvatarFlashHead(HandlerBase):
             raise
         finally:
             os.chdir(original_cwd)
+
+    def _resolve_condition_image_path(self, cond_image_path: str) -> str:
+        project_root = os.getcwd()
+        if not os.path.isabs(cond_image_path):
+            cond_image_path = os.path.join(project_root, cond_image_path)
+        if not os.path.exists(cond_image_path):
+            raise FileNotFoundError(f"FlashHead condition image does not exist: {cond_image_path}")
+        return cond_image_path
+
+    def _prepare_condition_image(self, cond_image_path: str, handler_config: FlashHeadConfig) -> str:
+        cond_image_path = self._resolve_condition_image_path(cond_image_path)
+        if handler_config.use_face_crop:
+            from handlers.avatar.flashhead.flashhead_face_crop import crop_face
+            try:
+                cropped = crop_face(cond_image_path)
+                cropped_path = cond_image_path + ".cropped.png"
+                cropped.save(cropped_path)
+                logger.info(f"FlashHead: face-cropped image saved to {cropped_path}")
+                return cropped_path
+            except Exception as e:
+                logger.warning(f"FlashHead: face crop failed ({e}), using original image")
+        return cond_image_path
+
+    def _import_get_base_data(self):
+        from flash_head.inference import get_base_data
+        return get_base_data
+
+    def update_condition_image(self, cond_image_path: str) -> str:
+        if self.pipeline is None:
+            raise RuntimeError("FlashHead pipeline is not loaded.")
+        if not isinstance(self._handler_config, FlashHeadConfig):
+            self._handler_config = FlashHeadConfig()
+        prepared_path = self._prepare_condition_image(cond_image_path, self._handler_config)
+        if not self._flashhead_algo_path:
+            if not self.handler_root:
+                raise RuntimeError("FlashHead handler root is not set.")
+            self._flashhead_algo_path = os.path.join(self.handler_root, "SoulX-FlashHead")
+
+        with self._condition_image_lock:
+            original_cwd = os.getcwd()
+            os.chdir(self._flashhead_algo_path)
+            try:
+                get_base_data = self._import_get_base_data()
+                get_base_data(
+                    pipeline=self.pipeline,
+                    cond_image_path_or_dir=prepared_path,
+                    base_seed=self._handler_config.base_seed,
+                    use_face_crop=False,
+                )
+                if hasattr(self.pipeline, "rank"):
+                    self.pipeline.rank = 1
+                self._condition_image_path = prepared_path
+                self._handler_config.cond_image_path = prepared_path
+                logger.info(f"FlashHead condition image updated: {prepared_path}")
+                return prepared_path
+            finally:
+                os.chdir(original_cwd)
 
     def create_context(self, session_context: SessionContext,
                        handler_config: Optional[FlashHeadConfig] = None) -> HandlerContext:

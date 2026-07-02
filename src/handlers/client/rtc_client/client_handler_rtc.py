@@ -8,7 +8,7 @@ from loguru import logger
 from chat_engine.contexts.session_clock import SessionClock
 import gradio
 import numpy as np
-from fastapi import FastAPI
+from fastapi import FastAPI, File, HTTPException, UploadFile
 
 # ============================================================================
 # H.264 Hardware Encoder Configuration (must execute before importing fastrtc)
@@ -244,9 +244,16 @@ from handlers.client.ws_client.ws_message_protocol import (
     serialize_message,
 )
 from service.frontend_service import register_frontend
+from service.frontend_service.avatar_image_upload import (
+    AvatarImageUploadError,
+    save_avatar_image_bytes,
+)
 from service.rtc_service.rtc_provider import RTCProvider
 from service.rtc_service.rtc_stream import RtcStream
 from chat_engine.data_models.chat_signal_type import ChatSignalType
+
+
+FLASHHEAD_AVATAR_UPLOAD_ROUTE = "/openavatarchat/avatar/flashhead/image"
 
 
 class RtcClientSessionDelegate(ClientSessionDelegate):
@@ -417,11 +424,70 @@ class ClientHandlerRtc(ClientHandlerBase):
         else:
             track_constraints["video"] = {}
 
-        return {
+        config = {
             "avatar_config": avatar_config,
             "rtc_configuration": rtc_configuration,
             "track_constraints": track_constraints,
         }
+        if self._find_flashhead_handler() is not None:
+            config["avatar_clone"] = {
+                "enabled": True,
+                "upload_route": FLASHHEAD_AVATAR_UPLOAD_ROUTE,
+            }
+        return config
+
+    def _has_active_sessions(self) -> bool:
+        if self.handler_delegate.session_delegates:
+            return True
+        if self.rtc_streamer_factory is None:
+            return False
+        for stream in self.rtc_streamer_factory.streams.values():
+            if stream is not None and stream.client_session_delegate is not None and not stream.quit.is_set():
+                return True
+        return False
+
+    def _find_flashhead_handler(self):
+        engine = self.handler_delegate.engine_ref() if self.handler_delegate.engine_ref else None
+        handler_manager = getattr(engine, "handler_manager", None)
+        if handler_manager is None:
+            return None
+        for registry in handler_manager.get_enabled_handler_registries(order_by_priority=False):
+            handler = getattr(registry, "handler", None)
+            if callable(getattr(handler, "update_condition_image", None)):
+                return handler
+        return None
+
+    def register_flashhead_avatar_upload_route(self, app: FastAPI):
+        @app.post(FLASHHEAD_AVATAR_UPLOAD_ROUTE)
+        async def upload_flashhead_avatar_image(file: UploadFile = File(...)):
+            if self._has_active_sessions():
+                raise HTTPException(
+                    status_code=409,
+                    detail="Please stop the current conversation before cloning a new avatar.",
+                )
+
+            flashhead_handler = self._find_flashhead_handler()
+            if flashhead_handler is None:
+                raise HTTPException(status_code=404, detail="FlashHead avatar handler is not enabled.")
+
+            data = await file.read()
+            try:
+                upload_result = save_avatar_image_bytes(
+                    data=data,
+                    original_filename=file.filename,
+                    content_type=file.content_type,
+                )
+                flashhead_handler.update_condition_image(upload_result.absolute_path)
+            except AvatarImageUploadError as exc:
+                raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+            except Exception as exc:
+                logger.opt(exception=exc).error("Failed to update FlashHead avatar image")
+                raise HTTPException(
+                    status_code=500,
+                    detail="Failed to update FlashHead avatar image.",
+                ) from exc
+
+            return upload_result.to_response()
 
     def setup_rtc_ui(self, ui, parent_block, fastapi: FastAPI, avatar_config):
         turn_entity = RTCProvider().prepare_rtc_configuration(self.handler_config.turn_config)
@@ -437,6 +503,7 @@ class ClientHandlerRtc(ClientHandlerBase):
             concurrency_limit=self.handler_config.concurrent_limit,
         )
         webrtc.mount(fastapi)
+        self.register_flashhead_avatar_upload_route(fastapi)
 
         def init_config_provider():
             return self.build_frontend_init_config(
