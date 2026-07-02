@@ -515,6 +515,7 @@ Your response:
             return
 
         context.speech_start_interrupt_streams.add(stream_key_str)
+        self._mark_speech_start_barge_in_triggered(context, inputs)
         self._emit_interrupt_and_cancel(
             context,
             "",
@@ -523,6 +524,28 @@ Your response:
             should_send_text=False,
             reason="speech_start_barge_in",
             update_cooldown=False,
+        )
+
+    def _mark_speech_start_barge_in_triggered(self, context: SemanticTurnDetectorContext,
+                                             inputs: ChatData):
+        """Mark the current human audio stream so its final ASR text can continue."""
+        if inputs.data is not None:
+            inputs.data.add_meta("speech_start_barge_in_triggered", True)
+
+        if not context.stream_manager or not inputs.stream_id:
+            return
+
+        stream = context.stream_manager.find_stream(inputs.stream_id)
+        if stream is None:
+            return
+
+        stream.update_inheritable_metadata(
+            {"speech_start_barge_in_triggered": True},
+            inherit=True,
+        )
+        logger.info(
+            f"INTERRUPT_TRACE speech_start_barge_in_marked "
+            f"session={context.session_id} stream={inputs.stream_id.stream_key_str}"
         )
 
     def _handle_partial_text(self, context: SemanticTurnDetectorContext, inputs: ChatData,
@@ -881,6 +904,22 @@ Your response:
                     else:
                         logger.debug("SemanticTurnDetector: Could not cancel intent judgment call (may already be running)")
                 logger.debug(f"SemanticTurnDetector: No interrupt, user said: {text[:50]}...")
+                if self._should_passthrough_after_speech_start_barge_in(
+                    context,
+                    text,
+                    inputs,
+                    output_definitions,
+                ):
+                    logger.info(
+                        f"SemanticTurnDetector: Speech-start barge-in text was not classified as interrupt, "
+                        f"submitting as normal HUMAN_TEXT: {text[:50]}..."
+                    )
+                    logger.info(
+                        f"INTERRUPT_TRACE interrupt_no_detect_passthrough "
+                        f"session={context.session_id} stream={source_stream} "
+                        f"since_check_start_ms={(time.monotonic() - check_start_mono) * 1000:.1f}"
+                    )
+                    self._submit_human_text(context, text, inputs, output_definitions)
         except Exception as e:
             logger.error(f"SemanticTurnDetector: Error in parallel LLM calls: {e}")
             logger.info(
@@ -900,6 +939,25 @@ Your response:
         finally:
             # Shutdown executor without waiting (let background tasks complete)
             executor.shutdown(wait=False)
+
+    def _should_passthrough_after_speech_start_barge_in(
+        self,
+        context: SemanticTurnDetectorContext,
+        text: str,
+        inputs: Optional[ChatData],
+        output_definitions: Optional[Dict[ChatDataType, HandlerDataInfo]],
+    ) -> bool:
+        if inputs is None or not inputs.is_last_data:
+            return False
+        if not output_definitions or ChatDataType.HUMAN_TEXT not in output_definitions:
+            return False
+        metadata = inputs.data.metadata if inputs.data is not None else {}
+        if not metadata.get("speech_start_barge_in_triggered"):
+            return False
+        text_clean = text.strip().strip(".,!?。，！？")
+        if len(text_clean) < context.config.min_text_length_for_interrupt:
+            return False
+        return not self._is_low_information_utterance(text_clean)
 
     def _detect_interrupt_llm(self, context: SemanticTurnDetectorContext, user_text: str, avatar_text: str) -> str:
         """Use LLM to detect if user wants to interrupt
@@ -1106,6 +1164,14 @@ Your response:
                     return True
 
         return False
+
+    def _is_low_information_utterance(self, text: str) -> bool:
+        text_clean = text.lower().strip()
+        fillers = {
+            "嗯", "嗯嗯", "哦", "哦哦", "啊", "好", "好的", "行", "可以",
+            "uh", "um", "hmm", "uh-huh", "ok", "okay",
+        }
+        return text_clean in fillers
 
     def _judge_interrupt_intent(self, context: SemanticTurnDetectorContext, interrupt_text: str, avatar_text: str) -> str:
         """Use LLM to judge interrupt intent: pure_interrupt or has_new_topic
