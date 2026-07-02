@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 PROJECT_DIR="/root/autodl-tmp/chatrobot_rebuild_workspace/OpenAvatarChat"
-CONFIG_FILE="config/chat_with_openai_compatible_bailian_cosyvoice_flashhead_6006.yaml"
+CONFIG_FILE="config/chat_with_openai_compatible_bailian_qwen_realtime_flashhead_6006.yaml"
 PORT="${PORT:-6006}"
 LOG_DIR="$PROJECT_DIR/logs"
 PID_FILE="$LOG_DIR/openavatarchat_${PORT}.pid"
