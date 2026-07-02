@@ -164,6 +164,25 @@ class ToolUseConfig(BaseModel):
     enabled: bool = Field(default=True, description="是否启用工具调用")
     max_tool_rounds: int = Field(default=5, description="单次 handle 内最大工具调用轮次")
     register_demo_tools: bool = Field(default=True, description="是否注册 demo 工具（用于测试）")
+    strict_schema: bool = Field(
+        default=False,
+        description="是否输出 DeepSeek strict 兼容 tool schema",
+    )
+    tool_modules: List[str] = Field(
+        default_factory=lambda: [
+            "handlers.agent.tools.demo_tools",
+            "handlers.agent.tools.web_search",
+        ],
+        description="要自动加载的工具模块。模块可暴露 register_tools 或 get_tools。",
+    )
+    enabled_tools: List[str] = Field(
+        default_factory=list,
+        description="非空时仅注册这些工具名",
+    )
+    disabled_tools: List[str] = Field(
+        default_factory=list,
+        description="禁止注册的工具名",
+    )
 
 
 class ChatAgentConfig(HandlerBaseConfigModel, BaseModel):
@@ -1170,12 +1189,21 @@ class ChatAgentHandler(HandlerBase, ABC):
 
     @staticmethod
     def _build_tool_registry(config: ChatAgentConfig) -> ToolRegistry:
-        registry = ToolRegistry()
+        registry = ToolRegistry(
+            strict_schema=config.tool_use.strict_schema,
+            enabled_tools=config.tool_use.enabled_tools,
+            disabled_tools=config.tool_use.disabled_tools,
+        )
 
-        if config.tool_use.enabled and config.tool_use.register_demo_tools:
-            from handlers.agent.tools.demo_tools import GetCurrentTimeTool, GetSystemInfoTool
-            registry.register(GetCurrentTimeTool())
-            registry.register(GetSystemInfoTool())
+        if config.tool_use.enabled:
+            modules = list(config.tool_use.tool_modules)
+            if not config.tool_use.register_demo_tools:
+                modules = [
+                    m for m in modules
+                    if m != "handlers.agent.tools.demo_tools"
+                ]
+            from handlers.agent.tools.tool_loader import load_tool_modules
+            load_tool_modules(registry, modules, config=config)
 
         logger.info(
             f"[ChatAgent] ToolRegistry initialized with {len(registry.tool_names)} tools: "

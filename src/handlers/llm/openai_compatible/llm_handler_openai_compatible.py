@@ -17,8 +17,38 @@ from chat_engine.data_models.chat_signal_type import ChatSignalType
 from chat_engine.data_models.chat_stream import StreamKey
 from chat_engine.contexts.session_context import SessionContext
 from chat_engine.data_models.runtime_data.data_bundle import DataBundle, DataBundleDefinition, DataBundleEntry
-from handlers.llm.openai_compatible.chat_history_manager import ChatHistory, HistoryMessage
+from .chat_history_manager import ChatHistory, HistoryMessage
+from .search_engine import format_search_results, search_bocha
 from chat_engine.data_models.chat_stream_config import ChatStreamConfig
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        logger.warning(f"Invalid float env {name}={value}, use default {default}")
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        logger.warning(f"Invalid int env {name}={value}, use default {default}")
+        return default
 
 
 class LLMConfig(HandlerBaseConfigModel, BaseModel):
@@ -28,6 +58,12 @@ class LLMConfig(HandlerBaseConfigModel, BaseModel):
     api_url: str = Field(default=None)
     enable_video_input: bool = Field(default=False)
     history_length: int = Field(default=20)
+    web_search_mode: str = Field(default=os.getenv("OPENAVATAR_WEB_SEARCH_MODE", "off"))
+    web_search_always: bool = Field(default=_env_bool("OPENAVATAR_WEB_SEARCH_ALWAYS", False))
+    bocha_api_key: str = Field(default=os.getenv("BOCHA_API_KEY"), repr=False)
+    bocha_endpoint: str = Field(default=os.getenv("BOCHA_ENDPOINT", "https://api.bochaai.com/v1/web-search"))
+    web_search_timeout: float = Field(default=_env_float("OPENAVATAR_WEB_SEARCH_TIMEOUT", 3.0))
+    web_search_result_limit: int = Field(default=_env_int("OPENAVATAR_WEB_SEARCH_RESULT_LIMIT", 5))
 
 
 class LLMContext(HandlerContext):
@@ -46,6 +82,12 @@ class LLMContext(HandlerContext):
         self.history = None
         self.enable_video_input = False
         self.active_stream_keys: Set[StreamKey] = set()
+        self.web_search_mode = "off"
+        self.web_search_always = False
+        self.bocha_api_key = None
+        self.bocha_endpoint = None
+        self.web_search_timeout = 3.0
+        self.web_search_result_limit = 5
 
 
 class HandlerLLM(HandlerBase, ABC):
@@ -100,6 +142,18 @@ class HandlerLLM(HandlerBase, ABC):
         context.api_url = handler_config.api_url
         context.enable_video_input = handler_config.enable_video_input
         context.history = ChatHistory(history_length=handler_config.history_length)
+        context.web_search_mode = os.getenv(
+            "OPENAVATAR_WEB_SEARCH_MODE",
+            handler_config.web_search_mode or "off",
+        ).strip().lower()
+        context.web_search_always = _env_bool("OPENAVATAR_WEB_SEARCH_ALWAYS", handler_config.web_search_always)
+        context.bocha_api_key = os.getenv("BOCHA_API_KEY", handler_config.bocha_api_key or "")
+        context.bocha_endpoint = os.getenv("BOCHA_ENDPOINT", handler_config.bocha_endpoint)
+        context.web_search_timeout = _env_float("OPENAVATAR_WEB_SEARCH_TIMEOUT", handler_config.web_search_timeout)
+        context.web_search_result_limit = _env_int(
+            "OPENAVATAR_WEB_SEARCH_RESULT_LIMIT",
+            handler_config.web_search_result_limit,
+        )
         context.client =    OpenAI(  
             # 若没有配置环境变量，请用百炼API Key将下行替换为：api_key="sk-xxx",
             api_key=context.api_key,
@@ -151,19 +205,33 @@ class HandlerLLM(HandlerBase, ABC):
         logger.debug(f'llm input {context.model_name} {current_content} ')
         if stream_key:
             context.active_stream_keys.add(stream_key)
+        cancelled = False
         try:
+            messages = [
+                context.system_prompt,
+            ] + current_content
+            if context.web_search_mode == "bocha":
+                search_context = self._build_bocha_search_context(context, chat_text)
+                if search_context:
+                    messages.insert(1, {
+                        "role": "system",
+                        "content": search_context,
+                    })
+
+            create_kwargs = {}
+            if context.web_search_mode == "dashscope":
+                create_kwargs["extra_body"] = {"enable_search": True}
+
             completion = context.client.chat.completions.create(
                 model=context.model_name,  # 此处以qwen-plus为例，可按需更换模型名称。模型列表：https://help.aliyun.com/zh/model-studio/getting-started/models
-                messages=[
-                    context.system_prompt,
-                ] + current_content,
+                messages=messages,
                 stream=True,
-                stream_options={"include_usage": True}
+                stream_options={"include_usage": True},
+                **create_kwargs,
             )
             context.current_image = None
             context.input_texts = ''
             context.output_texts = ''
-            cancelled = False
             for chunk in completion:
                 if stream_key and stream_key not in context.active_stream_keys:
                         cancelled = True
@@ -223,3 +291,49 @@ class HandlerLLM(HandlerBase, ABC):
                 pass
             context.client = None
 
+    def _build_bocha_search_context(self, context: LLMContext, query: str) -> str:
+        if not self._should_search(context, query):
+            return ""
+        if not context.bocha_api_key:
+            logger.warning("Bocha web search is enabled but BOCHA_API_KEY is not set.")
+            return ""
+        try:
+            results = search_bocha(
+                query,
+                context.bocha_api_key,
+                endpoint=context.bocha_endpoint,
+                timeout=context.web_search_timeout,
+                result_limit=context.web_search_result_limit,
+            )
+        except Exception as e:
+            logger.warning(f"Bocha web search failed: {e}")
+            return ""
+
+        formatted = format_search_results(results)
+        if not formatted:
+            return ""
+        return (
+            "以下是实时联网搜索结果。回答用户时优先参考这些结果；"
+            "如果搜索结果不足或相互矛盾，请明确说明不确定。"
+            "回答中可以简短提及来源。\n\n"
+            f"{formatted}"
+        )
+
+    def _should_search(self, context: LLMContext, query: str) -> bool:
+        if context.web_search_always:
+            return True
+        trigger_keywords = (
+            "搜索",
+            "搜一下",
+            "帮我搜",
+            "查一下",
+            "帮我查",
+            "查询",
+            "联网",
+            "最新",
+            "最近",
+            "今天",
+            "现在",
+            "新闻",
+        )
+        return any(keyword in query for keyword in trigger_keywords)

@@ -93,6 +93,11 @@ default:
         history_length: 20
         system_prompt: "请你扮演一个 AI 助手，用简短的两三句对话来回答用户的问题，并在对话内容中加入合适的标点符号，不需要讨论标点符号相关的内容"
         api_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        web_search_mode: "bocha"  # off | dashscope | bocha，可由 start_realtime_human.sh 覆盖
+        web_search_always: true
+        web_search_timeout: 3.0
+        web_search_result_limit: 5
+        # bocha_api_key: "" # default=os.getenv("BOCHA_API_KEY")
         # api_key: "" # default=os.getenv("DASHSCOPE_API_KEY")
       # === FlashHead 数字人 Avatar (Lite 模式) ===
       FlashHead:
