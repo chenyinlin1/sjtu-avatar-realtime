@@ -182,6 +182,7 @@ default:
           tool_modules:
             - "handlers.agent.tools.demo_tools"
             - "handlers.agent.tools.web_search"
+            - "handlers.agent.tools.music_request"
         # OpenClaw Bridge — Plugin Tools MCP + oac-bridge HTTP 通道
         oc_bridge:
           enabled: true

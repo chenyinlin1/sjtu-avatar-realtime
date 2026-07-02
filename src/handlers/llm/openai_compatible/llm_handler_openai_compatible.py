@@ -21,6 +21,11 @@ from .chat_history_manager import ChatHistory, HistoryMessage
 from .search_engine import format_search_results, search_bocha
 from chat_engine.data_models.chat_stream_config import ChatStreamConfig
 
+try:
+    from handlers.agent.tools.music_request import MusicRequestTool
+except Exception:
+    MusicRequestTool = None
+
 
 def _env_bool(name: str, default: bool = False) -> bool:
     value = os.getenv(name)
@@ -103,6 +108,8 @@ class HandlerLLM(HandlerBase, ABC):
                            context: HandlerContext) -> HandlerDetail:
         definition = DataBundleDefinition()
         definition.add_entry(DataBundleEntry.create_text_entry("avatar_text"))
+        audio_definition = DataBundleDefinition()
+        audio_definition.add_entry(DataBundleEntry.create_audio_entry("avatar_audio", 1, 24000))
         inputs = {
             ChatDataType.HUMAN_TEXT: HandlerDataInfo(
                 type=ChatDataType.HUMAN_TEXT,
@@ -115,7 +122,11 @@ class HandlerLLM(HandlerBase, ABC):
             ChatDataType.AVATAR_TEXT: HandlerDataInfo(
                 type=ChatDataType.AVATAR_TEXT,
                 definition=definition,
-            )
+            ),
+            ChatDataType.AVATAR_AUDIO: HandlerDataInfo(
+                type=ChatDataType.AVATAR_AUDIO,
+                definition=audio_definition,
+            ),
         }
         return HandlerDetail(
             inputs=inputs, 
@@ -154,6 +165,7 @@ class HandlerLLM(HandlerBase, ABC):
             "OPENAVATAR_WEB_SEARCH_RESULT_LIMIT",
             handler_config.web_search_result_limit,
         )
+        logger.info(f"LLM web search mode: {context.web_search_mode}")
         context.client =    OpenAI(  
             # 若没有配置环境变量，请用百炼API Key将下行替换为：api_key="sk-xxx",
             api_key=context.api_key,
@@ -200,6 +212,20 @@ class HandlerLLM(HandlerBase, ABC):
             streamer.stream_data(end_output, name="openai_compatible", config=ChatStreamConfig(cancelable=True), finish_stream=True)
             return
         logger.info(f'llm input {context.model_name} {chat_text} ')
+        music_query = self._extract_music_request(chat_text)
+        if music_query:
+            logger.info(f"Music request detected: {music_query}")
+            self._handle_music_request(
+                context,
+                music_query,
+                output_definition,
+                output_definitions,
+                streamer,
+                stream_key,
+                chat_text,
+                inputs.stream_id,
+            )
+            return
         current_content = context.history.generate_next_messages(chat_text, 
                                                                  [context.current_image] if context.current_image is not None else [])
         logger.debug(f'llm input {context.model_name} {current_content} ')
@@ -337,3 +363,147 @@ class HandlerLLM(HandlerBase, ABC):
             "新闻",
         )
         return any(keyword in query for keyword in trigger_keywords)
+
+    @staticmethod
+    def _extract_music_request(text: str) -> str:
+        normalized = (text or "").strip()
+        if not normalized:
+            return ""
+        patterns = [
+            r"^(?:请)?(?:帮我)?(?:播放|点播|点歌|放一下|放一首|来一首|想听|我要听|我想听|听一下)\s*(.+)$",
+            r"^(.+?)(?:这首歌)?(?:播放一下|放一下|来一首)$",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, normalized, re.IGNORECASE)
+            if match:
+                return match.group(1).strip(" ，。！？!?,;；：:\"'《》")
+        if any(keyword in normalized for keyword in ("点歌", "播放音乐", "放音乐")):
+            return re.sub(
+                r"(点歌|播放音乐|放音乐|播放|帮我|请)",
+                "",
+                normalized,
+            ).strip(" ，。！？!?,;；：:\"'《》")
+        return ""
+
+    def _handle_music_request(
+        self,
+        context: LLMContext,
+        music_query: str,
+        output_definition,
+        output_definitions: Dict[ChatDataType, HandlerDataInfo],
+        streamer,
+        stream_key: Optional[str],
+        original_text: str,
+        source_stream_id,
+    ):
+        reply = ""
+        play_url = ""
+        song_title = music_query
+        artist = ""
+        if MusicRequestTool is None:
+            reply = "点歌工具暂时不可用，我还没有加载到音乐模块。"
+        else:
+            try:
+                result = MusicRequestTool().execute({"song_name": music_query, "limit": 5})
+                if result.success:
+                    play_url = result.data.get("play_url") or ""
+                    selected = result.data.get("selected") or {}
+                    song_title = selected.get("title") or selected.get("name") or music_query
+                    artist = selected.get("artist") or ""
+                    reply = f"正在播放《{song_title}》" + (f" - {artist}" if artist else "")
+                else:
+                    reply = f"点歌失败：{result.error}"
+            except Exception as e:
+                logger.error(f"Music request failed: {e}")
+                reply = f"点歌失败：{e}"
+
+        if stream_key:
+            context.active_stream_keys.add(stream_key)
+        streamed_audio = False
+        if play_url:
+            try:
+                audio_definition = output_definitions.get(ChatDataType.AVATAR_AUDIO).definition
+                audio_streamer = context.data_submitter.get_streamer(ChatDataType.AVATAR_AUDIO)
+                audio_streamer.new_stream(
+                    sources=[source_stream_id] if source_stream_id else [],
+                    name="music_request",
+                    config=ChatStreamConfig(cancelable=True),
+                )
+                self._stream_music_audio(play_url, audio_definition, audio_streamer)
+                streamed_audio = True
+            except Exception as e:
+                logger.error(f"Music playback failed: {e}")
+                reply = f"已找到《{song_title}》，但播放失败：{e}"
+
+        if not streamed_audio:
+            output = DataBundle(output_definition)
+            output.set_main_data(reply)
+            streamer.stream_data(output)
+        context.history.add_message(HistoryMessage(role="human", content=original_text))
+        context.history.add_message(HistoryMessage(role="avatar", content=reply))
+        context.input_texts = ""
+        context.output_texts = ""
+        if stream_key:
+            context.active_stream_keys.discard(stream_key)
+        end_output = DataBundle(output_definition)
+        end_output.set_main_data("")
+        streamer.stream_data(end_output, finish_stream=True)
+
+    def _stream_music_audio(self, play_url: str, audio_definition, audio_streamer):
+        audio, sample_rate = self._download_music_audio(play_url)
+        target_sample_rate = 24000
+        if sample_rate != target_sample_rate:
+            import librosa
+            audio = librosa.resample(audio, orig_sr=sample_rate, target_sr=target_sample_rate)
+        audio = audio.astype("float32", copy=False)
+        max_seconds = _env_float("OPENAVATAR_MUSIC_MAX_SECONDS", 240.0)
+        if max_seconds > 0:
+            audio = audio[: int(target_sample_rate * max_seconds)]
+        if audio.size == 0:
+            raise RuntimeError("音乐音频为空")
+
+        chunk_size = int(target_sample_rate * 0.5)
+        for offset in range(0, len(audio), chunk_size):
+            chunk = audio[offset: offset + chunk_size]
+            if chunk.size == 0:
+                continue
+            output = DataBundle(audio_definition)
+            output.set_main_data(chunk.reshape(1, -1))
+            audio_streamer.stream_data(output)
+
+        end_output = DataBundle(audio_definition)
+        end_output.set_main_data(__import__("numpy").zeros((1, 240), dtype="float32"))
+        audio_streamer.stream_data(end_output, finish_stream=True)
+
+    def _download_music_audio(self, play_url: str):
+        import io
+        import av
+        import numpy as np
+        import requests
+
+        headers = {"User-Agent": "OpenAvatarChat/1.0"}
+        response = requests.get(play_url, headers=headers, timeout=20)
+        response.raise_for_status()
+        container = av.open(io.BytesIO(response.content))
+        frames = []
+        sample_rate = None
+        for frame in container.decode(audio=0):
+            arr = frame.to_ndarray()
+            if arr.ndim == 2:
+                if arr.shape[0] <= arr.shape[1]:
+                    arr = arr.mean(axis=0)
+                else:
+                    arr = arr.mean(axis=1)
+            if np.issubdtype(arr.dtype, np.integer):
+                max_value = float(np.iinfo(arr.dtype).max)
+                arr = arr.astype(np.float32) / max_value
+            else:
+                arr = arr.astype(np.float32)
+            frames.append(arr)
+            sample_rate = frame.sample_rate
+        container.close()
+        if not frames or sample_rate is None:
+            raise RuntimeError("音乐解码失败")
+        audio = np.concatenate(frames)
+        audio = np.clip(audio, -1.0, 1.0)
+        return audio, sample_rate
