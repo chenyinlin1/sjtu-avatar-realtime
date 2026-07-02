@@ -40,7 +40,7 @@ class InterruptHandler(HandlerBase):
 
     Signal semantics:
     - related_stream set → targeted cancel via cancel_stream_chain
-    - related_stream absent → broad cancel via cancel_streams_by_type(CLIENT_PLAYBACK)
+    - related_stream absent → cancel active playback, or pending avatar audio/text
     """
 
     def get_handler_info(self) -> HandlerBaseInfo:
@@ -95,19 +95,31 @@ class InterruptHandler(HandlerBase):
         )
 
         target_stream = signal.related_stream
+        cancel_data_type = None
 
-        # If no related_stream specified, try to find active playback streams
+        # If no related_stream specified, cancel by avatar response priority.
         if target_stream is None and context.stream_manager:
-            active_playback = [
-                s for s in context.stream_manager.get_active_streams()
-                if s.identity.data_type == ChatDataType.CLIENT_PLAYBACK
-            ]
-            if len(active_playback) == 1:
-                target_stream = active_playback[0].identity
-            elif len(active_playback) == 0:
-                logger.debug("InterruptHandler: No active playback streams to cancel")
+            active_streams = context.stream_manager.get_active_streams()
+            for data_type in (
+                ChatDataType.CLIENT_PLAYBACK,
+                ChatDataType.AVATAR_AUDIO,
+                ChatDataType.AVATAR_TEXT,
+            ):
+                candidates = [
+                    s for s in active_streams
+                    if s.identity.data_type == data_type
+                ]
+                if len(candidates) == 1:
+                    target_stream = candidates[0].identity
+                    break
+                if len(candidates) > 1:
+                    cancel_data_type = data_type
+                    break
+
+            if target_stream is None and cancel_data_type is None:
+                logger.debug("InterruptHandler: No active avatar response streams to cancel")
                 logger.info(
-                    f"INTERRUPT_TRACE interrupt_handler_no_active_playback "
+                    f"INTERRUPT_TRACE interrupt_handler_no_active_avatar_response "
                     f"session={context.session_id} "
                     f"since_received_ms={(time.monotonic() - received_mono) * 1000:.1f}"
                 )
@@ -129,13 +141,16 @@ class InterruptHandler(HandlerBase):
                     f"since_received_ms={(time.monotonic() - received_mono) * 1000:.1f}"
                 )
             else:
-                cancelled = context.stream_manager.cancel_streams_by_type(ChatDataType.CLIENT_PLAYBACK)
+                cancel_data_type = cancel_data_type or ChatDataType.CLIENT_PLAYBACK
+                cancelled = context.stream_manager.cancel_streams_by_type(cancel_data_type)
                 logger.info(
-                    f"InterruptHandler: cancel_streams_by_type cancelled {len(cancelled)} streams"
+                    f"InterruptHandler: cancel_streams_by_type({cancel_data_type}) "
+                    f"cancelled {len(cancelled)} streams"
                 )
                 logger.info(
                     f"INTERRUPT_TRACE interrupt_handler_cancel_done "
-                    f"session={context.session_id} mode=by_type cancelled_count={len(cancelled)} "
+                    f"session={context.session_id} mode=by_type target_type={cancel_data_type} "
+                    f"cancelled_count={len(cancelled)} "
                     f"since_received_ms={(time.monotonic() - received_mono) * 1000:.1f}"
                 )
 

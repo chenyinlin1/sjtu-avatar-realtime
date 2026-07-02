@@ -288,6 +288,7 @@ class DuplexVADHandler(HandlerAudioVAD):
                 output.set_main_data(np.expand_dims(audio_clip, axis=0))
                 for flag_name, flag_value in extra_args.items():
                     output.add_meta(flag_name, flag_value)
+                output.add_meta("avatar_was_speaking_at_stream_start", context.avatar_was_speaking_at_stream_start)
                 
                 if extra_args.get("early_vad_end", False):
                     output.add_event_by_type(EventType.EVT_EARLY_VAD_END)

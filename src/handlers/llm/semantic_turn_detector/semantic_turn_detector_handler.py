@@ -19,7 +19,7 @@ Supports two operation modes:
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, Future
-from typing import cast, Dict, Optional, List, Any
+from typing import cast, Dict, Optional, List, Any, Set
 
 import numpy as np
 from loguru import logger
@@ -56,6 +56,7 @@ class SemanticTurnDetectorConfig(HandlerBaseConfigModel):
 
     # Interrupt configuration
     interrupt_on_any_speech: bool = Field(default=False, description="True: any speech triggers interrupt; False: semantic judgment")
+    interrupt_on_speech_start: bool = Field(default=True, description="Interrupt active playback as soon as VAD confirms new speech")
     min_text_length_for_interrupt: int = Field(default=2, description="Minimum text length to consider for interrupt")
 
     # Completion detection configuration
@@ -87,6 +88,7 @@ class SemanticTurnDetectorContext(HandlerContext):
         self.current_audio_stream_start_mono: Optional[float] = None
         self.last_partial_asr_request_mono: Optional[float] = None
         self.last_interrupt_check_mono: Optional[float] = None
+        self.speech_start_interrupt_streams: Set[str] = set()
 
         # Track the current human_duplex_audio stream key
         # Used to pass to HUMAN_TEXT output so client can correlate preset audio tracking
@@ -362,6 +364,7 @@ Your response:
                 f"session={context.session_id} stream={stream_key_str} "
                 f"mono={context.current_audio_stream_start_mono:.6f}"
             )
+            self._maybe_emit_speech_start_interrupt(context, inputs, stream_key_str)
 
         # Accumulate audio data
         context.current_audio_buffer.append(audio.copy())
@@ -449,6 +452,78 @@ Your response:
                     logger.debug("SemanticTurnDetector: Early VAD end detected but audio buffer is empty")
             else:
                 logger.debug(f"SemanticTurnDetector: Early VAD end detected but avatar not speaking (is_avatar_speaking={is_avatar_speaking})")
+
+    def _get_active_playback_count(self, context: SemanticTurnDetectorContext) -> int:
+        return self._get_active_avatar_response_counts(context)[ChatDataType.CLIENT_PLAYBACK]
+
+    def _get_active_avatar_response_counts(
+        self, context: SemanticTurnDetectorContext
+    ) -> Dict[ChatDataType, int]:
+        counts = {
+            ChatDataType.CLIENT_PLAYBACK: 0,
+            ChatDataType.AVATAR_AUDIO: 0,
+            ChatDataType.AVATAR_TEXT: 0,
+        }
+        if context.stream_manager:
+            for stream in context.stream_manager.get_active_streams():
+                data_type = stream.identity.data_type
+                if data_type in counts:
+                    counts[data_type] += 1
+            return counts
+        if context.session_history is not None:
+            counts[ChatDataType.CLIENT_PLAYBACK] = len(
+                context.session_history.get_active_avatar_streams()
+            )
+        return counts
+
+    def _maybe_emit_speech_start_interrupt(self, context: SemanticTurnDetectorContext,
+                                           inputs: ChatData,
+                                           stream_key_str: Optional[str]):
+        """Preempt active or pending avatar response as soon as the user starts speaking.
+
+        ASR and semantic intent handling still run later; this only removes the
+        audible delay caused by waiting for ASR + LLM before cancelling playback.
+        """
+        if not context.config.enable_interrupt_detection or not context.config.interrupt_on_speech_start:
+            return
+        if not stream_key_str or stream_key_str in context.speech_start_interrupt_streams:
+            return
+
+        metadata_speaking = None
+        if inputs.data and inputs.data.metadata:
+            metadata_speaking = inputs.data.metadata.get("avatar_was_speaking_at_stream_start")
+
+        active_response_counts = self._get_active_avatar_response_counts(context)
+        active_playback_count = active_response_counts[ChatDataType.CLIENT_PLAYBACK]
+        active_avatar_audio_count = active_response_counts[ChatDataType.AVATAR_AUDIO]
+        active_avatar_text_count = active_response_counts[ChatDataType.AVATAR_TEXT]
+        active_avatar_response_count = (
+            active_playback_count + active_avatar_audio_count + active_avatar_text_count
+        )
+        should_preempt = active_avatar_response_count > 0 or bool(metadata_speaking)
+        check_mono = time.monotonic()
+        logger.info(
+            f"INTERRUPT_TRACE speech_start_barge_in_check "
+            f"session={context.session_id} stream={stream_key_str} mono={check_mono:.6f} "
+            f"active_playback_count={active_playback_count} "
+            f"active_avatar_audio_count={active_avatar_audio_count} "
+            f"active_avatar_text_count={active_avatar_text_count} "
+            f"metadata_avatar_speaking={metadata_speaking} should_preempt={should_preempt}"
+        )
+
+        if not should_preempt:
+            return
+
+        context.speech_start_interrupt_streams.add(stream_key_str)
+        self._emit_interrupt_and_cancel(
+            context,
+            "",
+            inputs,
+            output_definitions=None,
+            should_send_text=False,
+            reason="speech_start_barge_in",
+            update_cooldown=False,
+        )
 
     def _handle_partial_text(self, context: SemanticTurnDetectorContext, inputs: ChatData,
                             output_definitions: Dict[ChatDataType, HandlerDataInfo]):
@@ -1133,7 +1208,9 @@ Your response:
     def _emit_interrupt_and_cancel(self, context: SemanticTurnDetectorContext, trigger_text: str,
                                    inputs: Optional[ChatData] = None,
                                    output_definitions: Optional[Dict[ChatDataType, HandlerDataInfo]] = None,
-                                   should_send_text: bool = False):
+                                   should_send_text: bool = False,
+                                   reason: str = "semantic_interrupt",
+                                   update_cooldown: bool = True):
         """Emit INTERRUPT signal. Stream cancellation is handled by InterruptHandler.
 
         Handler responsibility: decide WHEN to interrupt (algorithm) and emit the signal.
@@ -1145,6 +1222,8 @@ Your response:
             inputs: Original ChatData input (for stream_id reference), optional
             output_definitions: Output definitions for sending HUMAN_TEXT if needed
             should_send_text: Whether to send trigger_text as HUMAN_TEXT to downstream LLM
+            reason: Interrupt reason stored in signal history
+            update_cooldown: Whether this interrupt should throttle later semantic checks
         """
         logger.info(f"SemanticTurnDetector: Triggering interrupt, user said: {trigger_text[:50]}..., should_send_text={should_send_text}")
         emit_start_mono = time.monotonic()
@@ -1156,36 +1235,35 @@ Your response:
             f"INTERRUPT_TRACE interrupt_emit_attempt "
             f"session={context.session_id} mono={emit_start_mono:.6f} "
             f"since_check_start_ms={since_check_start_ms:.1f} "
-            f"trigger_text_len={len(trigger_text)} should_send_text={should_send_text}"
+            f"trigger_text_len={len(trigger_text)} should_send_text={should_send_text} "
+            f"reason={reason} update_cooldown={update_cooldown}"
         )
 
-        context.last_interrupt_time = time.monotonic()
+        if update_cooldown:
+            context.last_interrupt_time = time.monotonic()
 
-        # Check if there are active playback streams to interrupt
-        has_active_playback = False
-        active_playback_count = -1
-        if context.stream_manager:
-            active_playback = [
-                s for s in context.stream_manager.get_active_streams()
-                if s.identity.data_type == ChatDataType.CLIENT_PLAYBACK
-            ]
-            active_playback_count = len(active_playback)
-            has_active_playback = active_playback_count > 0
-        elif context.session_history is not None:
-            active_playback_events = context.session_history.get_active_avatar_streams()
-            active_playback_count = len(active_playback_events)
-            has_active_playback = bool(active_playback_events)
+        # Check if there are active playback or pending avatar response streams to interrupt
+        active_response_counts = self._get_active_avatar_response_counts(context)
+        active_playback_count = active_response_counts[ChatDataType.CLIENT_PLAYBACK]
+        active_avatar_audio_count = active_response_counts[ChatDataType.AVATAR_AUDIO]
+        active_avatar_text_count = active_response_counts[ChatDataType.AVATAR_TEXT]
+        active_avatar_response_count = (
+            active_playback_count + active_avatar_audio_count + active_avatar_text_count
+        )
+        has_active_avatar_response = active_avatar_response_count > 0
         logger.info(
-            f"INTERRUPT_TRACE interrupt_active_playback_check "
-            f"session={context.session_id} has_active_playback={has_active_playback} "
-            f"active_playback_count={active_playback_count}"
+            f"INTERRUPT_TRACE interrupt_active_avatar_response_check "
+            f"session={context.session_id} has_active_avatar_response={has_active_avatar_response} "
+            f"active_playback_count={active_playback_count} "
+            f"active_avatar_audio_count={active_avatar_audio_count} "
+            f"active_avatar_text_count={active_avatar_text_count}"
         )
 
-        if not has_active_playback:
-            logger.debug("SemanticTurnDetector: No active playback streams to interrupt")
+        if not has_active_avatar_response:
+            logger.debug("SemanticTurnDetector: No active avatar response streams to interrupt")
             logger.info(
                 f"INTERRUPT_TRACE interrupt_emit_skip "
-                f"session={context.session_id} reason=no_active_playback "
+                f"session={context.session_id} reason=no_active_avatar_response "
                 f"since_emit_attempt_ms={(time.monotonic() - emit_start_mono) * 1000:.1f}"
             )
             if should_send_text and output_definitions and ChatDataType.HUMAN_TEXT in output_definitions:
@@ -1200,7 +1278,7 @@ Your response:
             source_type=ChatSignalSourceType.HANDLER,
             source_name=context.owner,
             signal_data={
-                "reason": "semantic_interrupt",
+                "reason": reason,
                 "trigger_text": trigger_text[:100],
             }
         )
@@ -1295,6 +1373,7 @@ Your response:
         # Clear audio buffer
         ctx.current_audio_buffer = []
         ctx.current_audio_stream_key = None
+        ctx.speech_start_interrupt_streams.clear()
 
 
 # Export the handler class
