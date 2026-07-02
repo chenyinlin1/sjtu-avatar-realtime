@@ -88,6 +88,16 @@
       :stream-state="streamState"
       :upload-route="avatarCloneUploadRoute"
     />
+    <div
+      :class="['action', 'interrupt-action', { active: canInterrupt, disabled: !canInterrupt }]"
+      :title="canInterrupt ? '打断当前回复' : '当前没有可打断的回复'"
+      role="button"
+      aria-label="打断当前回复"
+      :aria-disabled="!canInterrupt"
+      @click="handleInterrupt"
+    >
+      <Iconfont :icon="HandStop" />
+    </div>
     <div class="action" @click="handleVolumeMute">
       <Iconfont :icon="volumeMuted ? VolumeOff : VolumeOn" />
     </div>
@@ -113,6 +123,7 @@ import Iconfont, {
   CameraOff,
   CameraOn,
   CheckIcon,
+  HandStop,
   MicOff,
   MicOn,
   SubtitleOff,
@@ -139,11 +150,12 @@ const {
   availableVideoDevices,
 } = storeToRefs(mediaStore)
 
-const { volumeMuted, showChatRecords } = storeToRefs(chatStore)
+const { volumeMuted, showChatRecords, replying } = storeToRefs(chatStore)
 const { avatarCloneEnabled, avatarCloneUploadRoute } = storeToRefs(appStore)
 const streamState = computed(() =>
   appStore.chatMode === 'ws' ? wsChatStore.streamState : videoChatStore.streamState
 )
+const canInterrupt = computed(() => replying.value && streamState.value === 'open')
 
 const { handleVolumeMute, handleSubtitleToggle } = chatStore
 const { handleCameraOff, handleMicMuted, handleDeviceChange } = mediaStore
@@ -151,6 +163,15 @@ const { handleCameraOff, handleMicMuted, handleDeviceChange } = mediaStore
 const { wrapperRect, isLandscape } = storeToRefs(visionStore)
 const micListShow = ref(false)
 const cameraListShow = ref(false)
+
+function handleInterrupt(): void {
+  if (!canInterrupt.value) return
+  if (appStore.chatMode === 'ws') {
+    wsChatStore.interrupt()
+  } else {
+    videoChatStore.interrupt()
+  }
+}
 </script>
 
 <style lang="less" scoped>
@@ -257,6 +278,27 @@ const cameraListShow = ref(false)
 
   .action:hover {
     background: #67666a;
+  }
+
+  .interrupt-action {
+    opacity: 0.46;
+
+    &.active {
+      opacity: 1;
+      background: rgba(232, 93, 93, 0.88);
+    }
+
+    &.disabled {
+      cursor: not-allowed;
+    }
+  }
+
+  .interrupt-action.active:hover {
+    background: #e85d5d;
+  }
+
+  .interrupt-action.disabled:hover {
+    background: transparent;
   }
 }
 

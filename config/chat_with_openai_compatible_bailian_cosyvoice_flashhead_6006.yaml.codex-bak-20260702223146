@@ -82,9 +82,8 @@ default:
       CosyVoice:
         enabled: True
         module: tts/bailian_tts/tts_handler_cosyvoice_bailian
-        voice: "longanhuan_v3"
-        model_name: "cosyvoice-v3-flash"
-        instruction: "请用四川话表达。"
+        voice: "longxiaochun"
+        model_name: "cosyvoice-v1"
         # api_key: "" # default=os.getenv("DASHSCOPE_API_KEY")
       LLMOpenAICompatible:
         enabled: True

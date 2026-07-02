@@ -33,7 +33,6 @@ class TTSConfig(HandlerBaseConfigModel, BaseModel):
     sample_rate: int = Field(default=24000)
     api_key: str = Field(default=os.getenv("DASHSCOPE_API_KEY"), repr=False)
     model_name: str = Field(default="cosyvoice-1")
-    instruction: Optional[str] = Field(default=None)
 
 
 @dataclass
@@ -104,15 +103,9 @@ class TTSContext(HandlerContext):
                         context=self,
                         output_definition=streamer.data_definition,
                         session=session)
-                    synthesizer_kwargs = {
-                        "model": handler.model_name,
-                        "voice": handler.voice,
-                        "callback": callback,
-                        "format": AudioFormat.PCM_24000HZ_MONO_16BIT,
-                    }
-                    if handler.instruction:
-                        synthesizer_kwargs["instruction"] = handler.instruction
-                    session.synthesizer = SpeechSynthesizer(**synthesizer_kwargs)
+                    session.synthesizer = SpeechSynthesizer(
+                        model=handler.model_name, voice=handler.voice,
+                        callback=callback, format=AudioFormat.PCM_24000HZ_MONO_16BIT)
                 logger.info(f'streaming_call {text}')
                 session.synthesizer.streaming_call(text)
             else:
@@ -139,7 +132,6 @@ class HandlerTTS(HandlerBase, ABC):
         self.sample_rate = None
         self.model_name = None
         self.api_key = None
-        self.instruction = None
 
     def get_handler_info(self) -> HandlerBaseInfo:
         return HandlerBaseInfo(
@@ -174,7 +166,6 @@ class HandlerTTS(HandlerBase, ABC):
         self.ref_audio_path = config.ref_audio_path
         self.ref_audio_text = config.ref_audio_text
         self.model_name = config.model_name
-        self.instruction = config.instruction
         if 'DASHSCOPE_API_KEY' in os.environ:
             # load API-key from environment variable DASHSCOPE_API_KEY
             dashscope.api_key = os.environ['DASHSCOPE_API_KEY']
