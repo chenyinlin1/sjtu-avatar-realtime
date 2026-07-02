@@ -1,6 +1,8 @@
 import asyncio
 import json
+import os
 from typing import Dict, Optional, cast, Union, Tuple
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from loguru import logger
@@ -8,7 +10,8 @@ from loguru import logger
 from chat_engine.contexts.session_clock import SessionClock
 import gradio
 import numpy as np
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse
 
 # ============================================================================
 # H.264 Hardware Encoder Configuration (must execute before importing fastrtc)
@@ -248,12 +251,23 @@ from service.frontend_service.avatar_image_upload import (
     AvatarImageUploadError,
     save_avatar_image_bytes,
 )
+from service.frontend_service.voice_clone_upload import (
+    VoiceCloneUploadError,
+    create_cosyvoice_voice_clone,
+    find_voice_clone_audio_file,
+    is_voice_enrollment_download_error,
+    save_voice_clone_audio_bytes,
+)
 from service.rtc_service.rtc_provider import RTCProvider
 from service.rtc_service.rtc_stream import RtcStream
 from chat_engine.data_models.chat_signal_type import ChatSignalType
 
 
 FLASHHEAD_AVATAR_UPLOAD_ROUTE = "/openavatarchat/avatar/flashhead/image"
+VOICE_CLONE_UPLOAD_ROUTE = "/openavatarchat/voice-clone"
+VOICE_CLONE_RESET_ROUTE = "/openavatarchat/voice-clone/reset"
+VOICE_CLONE_AUDIO_ROUTE = "/openavatarchat/voice-clone/audio/{filename}"
+VOICE_CLONE_SAMPLE_TEXT = "今天天气真不错，我想去成都喝茶聊天，慢慢说话。"
 
 
 class RtcClientSessionDelegate(ClientSessionDelegate):
@@ -434,6 +448,17 @@ class ClientHandlerRtc(ClientHandlerBase):
                 "enabled": True,
                 "upload_route": FLASHHEAD_AVATAR_UPLOAD_ROUTE,
             }
+        voice_clone_handler = self._find_voice_clone_tts_handler()
+        if voice_clone_handler is not None:
+            status = voice_clone_handler.get_voice_clone_status()
+            config["voice_clone"] = {
+                "enabled": True,
+                "upload_route": VOICE_CLONE_UPLOAD_ROUTE,
+                "reset_route": VOICE_CLONE_RESET_ROUTE,
+                "sample_text": VOICE_CLONE_SAMPLE_TEXT,
+                "active": status.get("active", False),
+                "model_name": status.get("model_name"),
+            }
         return config
 
     def _has_active_sessions(self) -> bool:
@@ -456,6 +481,39 @@ class ClientHandlerRtc(ClientHandlerBase):
             if callable(getattr(handler, "update_condition_image", None)):
                 return handler
         return None
+
+    def _find_voice_clone_tts_handler(self):
+        engine = self.handler_delegate.engine_ref() if self.handler_delegate.engine_ref else None
+        handler_manager = getattr(engine, "handler_manager", None)
+        if handler_manager is None:
+            return None
+        for registry in handler_manager.get_enabled_handler_registries(order_by_priority=False):
+            handler = getattr(registry, "handler", None)
+            if callable(getattr(handler, "update_voice_clone", None)) and callable(
+                getattr(handler, "get_voice_clone_target_model", None)
+            ):
+                return handler
+        return None
+
+    @staticmethod
+    def _external_url(request: Request, path: str) -> str:
+        configured_public_url = os.getenv("OPENAVATARCHAT_PUBLIC_URL", "").strip().rstrip("/")
+        if configured_public_url:
+            return f"{configured_public_url}{path}"
+
+        forwarded_proto = request.headers.get("x-forwarded-proto")
+        forwarded_host = request.headers.get("x-forwarded-host")
+        scheme = (forwarded_proto.split(",")[0].strip() if forwarded_proto else request.url.scheme) or "http"
+        host = (forwarded_host.split(",")[0].strip() if forwarded_host else request.headers.get("host")) or request.url.netloc
+        origin = request.headers.get("origin", "").strip()
+        if origin:
+            parsed_origin = urlparse(origin)
+            if parsed_origin.scheme and parsed_origin.netloc:
+                scheme = parsed_origin.scheme
+                host = parsed_origin.netloc
+        if scheme == "http" and host.endswith(":8443"):
+            scheme = "https"
+        return f"{scheme}://{host}{path}"
 
     def register_flashhead_avatar_upload_route(self, app: FastAPI):
         @app.post(FLASHHEAD_AVATAR_UPLOAD_ROUTE)
@@ -489,6 +547,78 @@ class ClientHandlerRtc(ClientHandlerBase):
 
             return upload_result.to_response()
 
+    def register_voice_clone_routes(self, app: FastAPI):
+        @app.get(VOICE_CLONE_AUDIO_ROUTE)
+        async def get_voice_clone_audio(filename: str):
+            try:
+                audio_path = find_voice_clone_audio_file(filename)
+            except VoiceCloneUploadError as exc:
+                raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+            return FileResponse(audio_path, media_type="audio/wav", filename=filename)
+
+        @app.post(VOICE_CLONE_UPLOAD_ROUTE)
+        async def upload_voice_clone_audio(request: Request, file: UploadFile = File(...)):
+            if self._has_active_sessions():
+                raise HTTPException(
+                    status_code=409,
+                    detail="Please stop the current conversation before cloning a voice.",
+                )
+
+            tts_handler = self._find_voice_clone_tts_handler()
+            if tts_handler is None:
+                raise HTTPException(status_code=404, detail="CosyVoice TTS handler is not enabled.")
+
+            data = await file.read()
+            try:
+                upload_result = save_voice_clone_audio_bytes(
+                    data=data,
+                    original_filename=file.filename,
+                    content_type=file.content_type,
+                )
+                audio_url = self._external_url(
+                    request,
+                    f"/openavatarchat/voice-clone/audio/{upload_result.filename}",
+                )
+                target_model = tts_handler.get_voice_clone_target_model()
+                logger.info(f"Creating CosyVoice clone with public audio URL: {audio_url}")
+                voice_id = await asyncio.to_thread(
+                    create_cosyvoice_voice_clone,
+                    audio_url=audio_url,
+                    target_model=target_model,
+                    api_key=os.getenv("DASHSCOPE_API_KEY"),
+                )
+                tts_handler.update_voice_clone(voice_id, model_name=target_model)
+            except VoiceCloneUploadError as exc:
+                raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+            except Exception as exc:
+                if is_voice_enrollment_download_error(exc):
+                    logger.opt(exception=exc).error("Bailian could not download voice clone audio")
+                    raise HTTPException(
+                        status_code=502,
+                        detail=(
+                            "Bailian could not download the recorded audio. "
+                            "Please check the OpenAvatarChat public URL and try again."
+                        ),
+                    ) from exc
+                logger.opt(exception=exc).error("Failed to clone voice with CosyVoice")
+                raise HTTPException(status_code=500, detail="Failed to clone voice.") from exc
+
+            return upload_result.to_response(voice_id=voice_id, model_name=target_model)
+
+        @app.post(VOICE_CLONE_RESET_ROUTE)
+        async def reset_voice_clone():
+            if self._has_active_sessions():
+                raise HTTPException(
+                    status_code=409,
+                    detail="Please stop the current conversation before resetting the voice.",
+                )
+
+            tts_handler = self._find_voice_clone_tts_handler()
+            if tts_handler is None:
+                raise HTTPException(status_code=404, detail="CosyVoice TTS handler is not enabled.")
+            tts_handler.reset_voice_clone()
+            return {"status": "ok", **tts_handler.get_voice_clone_status()}
+
     def setup_rtc_ui(self, ui, parent_block, fastapi: FastAPI, avatar_config):
         turn_entity = RTCProvider().prepare_rtc_configuration(self.handler_config.turn_config)
         if turn_entity is None:
@@ -504,6 +634,7 @@ class ClientHandlerRtc(ClientHandlerBase):
         )
         webrtc.mount(fastapi)
         self.register_flashhead_avatar_upload_route(fastapi)
+        self.register_voice_clone_routes(fastapi)
 
         def init_config_provider():
             return self.build_frontend_init_config(

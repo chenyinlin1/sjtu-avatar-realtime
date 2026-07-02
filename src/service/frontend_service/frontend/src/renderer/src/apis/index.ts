@@ -24,6 +24,21 @@ export function uploadFlashHeadAvatar(uploadRoute: string, file: File): Promise<
   })
 }
 
+export function uploadVoiceClone(uploadRoute: string, file: File): Promise<Response> {
+  const formData = new FormData()
+  formData.append('file', file)
+  return fetch(uploadRoute, {
+    method: 'POST',
+    body: formData,
+  })
+}
+
+export function resetVoiceClone(resetRoute: string): Promise<Response> {
+  return fetch(resetRoute, {
+    method: 'POST',
+  })
+}
+
 export function createWS(ws_route: string, webRTCId: string): WS {
   const token = localStorage.getItem('auth_openavatarchat')
   let url = `${useSSL ? 'wss' : 'ws'}://${serverHost}${ws_route}/${webRTCId}`

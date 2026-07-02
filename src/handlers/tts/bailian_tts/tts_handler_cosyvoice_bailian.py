@@ -140,6 +140,10 @@ class HandlerTTS(HandlerBase, ABC):
         self.model_name = None
         self.api_key = None
         self.instruction = None
+        self.default_voice = None
+        self.default_model_name = None
+        self.default_instruction = None
+        self.cloned_voice_id = None
 
     def get_handler_info(self) -> HandlerBaseInfo:
         return HandlerBaseInfo(
@@ -175,11 +179,38 @@ class HandlerTTS(HandlerBase, ABC):
         self.ref_audio_text = config.ref_audio_text
         self.model_name = config.model_name
         self.instruction = config.instruction
+        self.default_voice = config.voice
+        self.default_model_name = config.model_name
+        self.default_instruction = config.instruction
         if 'DASHSCOPE_API_KEY' in os.environ:
             # load API-key from environment variable DASHSCOPE_API_KEY
             dashscope.api_key = os.environ['DASHSCOPE_API_KEY']
         else:
             dashscope.api_key = config.api_key  # set API-key manually
+
+    def get_voice_clone_target_model(self) -> str:
+        return self.default_model_name or self.model_name
+
+    def update_voice_clone(self, voice_id: str, model_name: Optional[str] = None):
+        self.voice = voice_id
+        self.model_name = model_name or self.get_voice_clone_target_model()
+        self.cloned_voice_id = voice_id
+        logger.info(f"TTS: Switched to cloned voice {voice_id} with model {self.model_name}")
+
+    def reset_voice_clone(self):
+        self.voice = self.default_voice
+        self.model_name = self.default_model_name
+        self.instruction = self.default_instruction
+        self.cloned_voice_id = None
+        logger.info(f"TTS: Reset to default voice {self.voice} with model {self.model_name}")
+
+    def get_voice_clone_status(self) -> dict:
+        return {
+            "active": bool(self.cloned_voice_id),
+            "voice_id": self.cloned_voice_id,
+            "model_name": self.model_name,
+            "default_voice": self.default_voice,
+        }
 
     def create_context(self, session_context, handler_config=None):
         if not isinstance(handler_config, TTSConfig):
@@ -216,12 +247,22 @@ class HandlerTTS(HandlerBase, ABC):
             session = context.api_links.pop(stream_key, None)
             if session:
                 logger.info(f"TTS: Cancelling session for input stream {stream_key}")
+                logger.info(
+                    f"INTERRUPT_TRACE tts_cancel_received "
+                    f"session={context.session_id} mode=input stream={stream_key} "
+                    f"mono={time.monotonic():.6f}"
+                )
                 session.reset()
                 return
             # 检查是否为我们的输出流被取消（例如下游发起的打断）
             for key, session in list(context.api_links.items()):
                 if session.output_stream_key == stream_key:
                     logger.info(f"TTS: Cancelling session for output stream {stream_key}")
+                    logger.info(
+                        f"INTERRUPT_TRACE tts_cancel_received "
+                        f"session={context.session_id} mode=output stream={stream_key} "
+                        f"input_stream={key} mono={time.monotonic():.6f}"
+                    )
                     session.reset()
                     context.api_links.pop(key, None)
                     return

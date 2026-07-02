@@ -17,6 +17,7 @@ os.environ.setdefault("XFORMERS_IGNORE_FLASH_VERSION_CHECK", "1")
 import sys
 import threading
 import copy
+import time
 from typing import Dict, Optional, cast
 
 import numpy as np
@@ -495,6 +496,11 @@ class HandlerAvatarFlashHead(HandlerBase):
         if (signal.type == ChatSignalType.STREAM_CANCEL
                 and signal.related_stream.data_type == ChatDataType.CLIENT_PLAYBACK):
             logger.info("FlashHead: Received STREAM_CANCEL signal, interrupting avatar")
+            logger.info(
+                f"INTERRUPT_TRACE flashhead_cancel_received "
+                f"session={context.session_id} stream={signal.related_stream.stream_key_str} "
+                f"mono={time.monotonic():.6f}"
+            )
             context.interrupt()
 
     def destroy_context(self, context: HandlerContext):

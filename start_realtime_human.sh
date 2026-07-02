@@ -7,7 +7,18 @@ CONFIG_FILE="config/chat_with_openai_compatible_bailian_cosyvoice_flashhead_6006
 PORT="${PORT:-6006}"
 LOG_DIR="$PROJECT_DIR/logs"
 PID_FILE="$LOG_DIR/openavatarchat_${PORT}.pid"
-PUBLIC_URL="https://u848390-b73d-1dabc33d.cqa1.seetacloud.com:8443"
+case "$PORT" in
+  6006)
+    DEFAULT_PUBLIC_URL="https://u848390-a11e-6f8e472d.cqa1.seetacloud.com:8443"
+    ;;
+  6008)
+    DEFAULT_PUBLIC_URL="https://uu848390-a11e-6f8e472d.cqa1.seetacloud.com:8443"
+    ;;
+  *)
+    DEFAULT_PUBLIC_URL=""
+    ;;
+esac
+PUBLIC_URL="${OPENAVATARCHAT_PUBLIC_URL:-$DEFAULT_PUBLIC_URL}"
 DEFAULT_DASHSCOPE_API_KEY="sk-2416366818d84babbd9cde7992d126cf"
 
 cd "$PROJECT_DIR"
@@ -65,6 +76,7 @@ fi
 
 LOG_FILE="$LOG_DIR/openavatarchat_${PORT}_$(date +%Y%m%d_%H%M%S).log"
 export DASHSCOPE_API_KEY
+export OPENAVATARCHAT_PUBLIC_URL="$PUBLIC_URL"
 
 nohup setsid "$PYTHON_BIN" src/demo.py \
   --config "$CONFIG_FILE" \

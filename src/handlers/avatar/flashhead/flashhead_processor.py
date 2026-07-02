@@ -518,6 +518,13 @@ class FlashHeadProcessor:
         generates clean idle frames without residual speech mouth movements.
         """
         logger.info("FlashHeadProcessor: interrupt requested")
+        interrupt_start_mono = time.monotonic()
+        pending_queue_size = self._output_queue.qsize()
+        logger.info(
+            f"INTERRUPT_TRACE flashhead_processor_interrupt_start "
+            f"mono={interrupt_start_mono:.6f} queue_size={pending_queue_size} "
+            f"current_speech_id={self._current_speech_id} speaking={self._speaking}"
+        )
         with self._lock:
             self._interrupted = True
             self._speaking = False
@@ -536,11 +543,18 @@ class FlashHeadProcessor:
         )
 
         # Drain output queue
+        drained = 0
         while not self._output_queue.empty():
             try:
                 self._output_queue.get_nowait()
+                drained += 1
             except queue.Empty:
                 break
+        logger.info(
+            f"INTERRUPT_TRACE flashhead_processor_interrupt_done "
+            f"mono={time.monotonic():.6f} drained_queue_items={drained} "
+            f"duration_ms={(time.monotonic() - interrupt_start_mono) * 1000:.1f}"
+        )
 
     def reset_interrupt(self):
         """Allow new audio processing after an interrupt."""

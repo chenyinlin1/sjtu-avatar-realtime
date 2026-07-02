@@ -7,7 +7,8 @@ This handler extends the standard Silero VAD to support full-duplex mode:
 - Listens for SEMANTIC_WAIT signal to extend waiting time
 """
 
-from typing import cast, Dict
+import time
+from typing import cast, Dict, Optional
 
 from loguru import logger
 
@@ -41,6 +42,7 @@ class DuplexVADContext(HumanAudioVADContext):
         # Avatar speaking state at stream start - recorded when entering START state
         # This state persists throughout the VAD cycle (START -> POST_END) and is cleared when POST_END ends
         self.avatar_was_speaking_at_stream_start: bool = False
+        self.interrupt_trace_speech_start_mono: Optional[float] = None
 
 
 class DuplexVADHandler(HandlerAudioVAD):
@@ -221,8 +223,8 @@ class DuplexVADHandler(HandlerAudioVAD):
             if human_speech_start:
                 # Check if avatar is speaking at the moment we enter START state
                 # Use current time since stream hasn't been created yet
-                import time
                 check_timestamp = time.monotonic()
+                context.interrupt_trace_speech_start_mono = check_timestamp
                 if context.session_history:
                     is_avatar_speaking = context.session_history.was_avatar_speaking_at(check_timestamp)
                     context.avatar_was_speaking_at_stream_start = is_avatar_speaking
@@ -234,6 +236,13 @@ class DuplexVADHandler(HandlerAudioVAD):
                     # No session history available, default to False
                     context.avatar_was_speaking_at_stream_start = False
                     logger.warning("Duplex VAD: No session_history available, defaulting avatar_was_speaking_at_stream_start=False")
+                logger.info(
+                    f"INTERRUPT_TRACE vad_speech_start "
+                    f"session={context.session_id} speech_id={speech_id} "
+                    f"mono={check_timestamp:.6f} head_sample_id={head_sample_id} "
+                    f"speech_prob={speech_prob:.4f} current_db={context.current_db:.1f} "
+                    f"avatar_speaking_at_start={context.avatar_was_speaking_at_stream_start}"
+                )
             
             # Handle POST_END entry
             if entering_post_end:
@@ -282,6 +291,20 @@ class DuplexVADHandler(HandlerAudioVAD):
                 
                 if extra_args.get("early_vad_end", False):
                     output.add_event_by_type(EventType.EVT_EARLY_VAD_END)
+                    early_mono = time.monotonic()
+                    since_speech_start_ms = (
+                        (early_mono - context.interrupt_trace_speech_start_mono) * 1000
+                        if context.interrupt_trace_speech_start_mono is not None else -1
+                    )
+                    logger.info(
+                        f"INTERRUPT_TRACE vad_early_end "
+                        f"session={context.session_id} speech_id={speech_id} mono={early_mono:.6f} "
+                        f"since_speech_start_ms={since_speech_start_ms:.1f} "
+                        f"head_sample_id={timestamp_val} silence_length={context.silence_length} "
+                        f"early_silence_length={context.early_silence_length} "
+                        f"early_vad_end_count={context.early_vad_end_count} "
+                        f"avatar_speaking_at_start={context.avatar_was_speaking_at_stream_start}"
+                    )
 
                 output_chat_data = ChatData(
                     type=ChatDataType.HUMAN_DUPLEX_AUDIO,
@@ -289,6 +312,18 @@ class DuplexVADHandler(HandlerAudioVAD):
                 )
                 if human_speech_end:
                     output_chat_data.is_last_data = True
+                    end_mono = time.monotonic()
+                    since_speech_start_ms = (
+                        (end_mono - context.interrupt_trace_speech_start_mono) * 1000
+                        if context.interrupt_trace_speech_start_mono is not None else -1
+                    )
+                    logger.info(
+                        f"INTERRUPT_TRACE vad_speech_end "
+                        f"session={context.session_id} speech_id={speech_id} mono={end_mono:.6f} "
+                        f"since_speech_start_ms={since_speech_start_ms:.1f} "
+                        f"head_sample_id={timestamp_val} silence_length={context.silence_length} "
+                        f"entering_post_end={entering_post_end}"
+                    )
                 if timestamp_val >= 0:
                     output_chat_data.timestamp = timestamp_val, sample_rate
                 

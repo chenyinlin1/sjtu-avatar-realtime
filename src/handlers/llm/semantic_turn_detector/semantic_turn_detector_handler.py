@@ -84,6 +84,9 @@ class SemanticTurnDetectorContext(HandlerContext):
         # Audio accumulation for partial ASR
         self.current_audio_buffer: List[np.ndarray] = []  # Audio buffer for current stream
         self.current_audio_stream_key: Optional[str] = None  # Current audio stream key
+        self.current_audio_stream_start_mono: Optional[float] = None
+        self.last_partial_asr_request_mono: Optional[float] = None
+        self.last_interrupt_check_mono: Optional[float] = None
 
         # Track the current human_duplex_audio stream key
         # Used to pass to HUMAN_TEXT output so client can correlate preset audio tracking
@@ -345,14 +348,20 @@ Your response:
         # Check for new stream
         stream_key = inputs.stream_id.key if inputs.stream_id else None
         stream_key_str = inputs.stream_id.stream_key_str if inputs.stream_id else None
-        if stream_key != context.current_audio_stream_key:
+        if stream_key != context.current_audio_stream_key or context.current_audio_stream_start_mono is None:
             # New stream, reset buffer
             context.current_audio_buffer = []
             context.current_audio_stream_key = stream_key
+            context.current_audio_stream_start_mono = time.monotonic()
             # Track the human_duplex_audio stream key string for passing to HUMAN_TEXT output
             # Use stream_key_str (string) instead of stream_key (StreamKey object)
             context.current_human_duplex_audio_stream_key = stream_key_str
             logger.debug(f"SemanticTurnDetector: New audio stream detected: {stream_key_str}")
+            logger.info(
+                f"INTERRUPT_TRACE semantic_audio_stream_begin "
+                f"session={context.session_id} stream={stream_key_str} "
+                f"mono={context.current_audio_stream_start_mono:.6f}"
+            )
 
         # Accumulate audio data
         context.current_audio_buffer.append(audio.copy())
@@ -366,6 +375,19 @@ Your response:
             if context.session_history:
                 current_time = time.monotonic()
                 is_avatar_speaking = context.session_history.was_avatar_speaking_at(current_time)
+            trace_now = time.monotonic()
+            since_stream_ms = (
+                (trace_now - context.current_audio_stream_start_mono) * 1000
+                if context.current_audio_stream_start_mono is not None else -1
+            )
+            buffered_samples = sum(chunk.shape[0] for chunk in context.current_audio_buffer)
+            logger.info(
+                f"INTERRUPT_TRACE semantic_early_vad_end_received "
+                f"session={context.session_id} stream={stream_key_str} mono={trace_now:.6f} "
+                f"since_audio_stream_ms={since_stream_ms:.1f} buffered_samples={buffered_samples} "
+                f"avatar_speaking={is_avatar_speaking} "
+                f"interrupt_detection={context.config.enable_interrupt_detection}"
+            )
 
             if is_avatar_speaking and context.config.enable_interrupt_detection:
                 # Avatar is speaking and we detected early_vad_end - trigger partial ASR
@@ -402,11 +424,20 @@ Your response:
                                 if inputs.timestamp:
                                     output_chat_data.timestamp = inputs.timestamp
 
+                                context.last_partial_asr_request_mono = time.monotonic()
                                 output_streamer.stream_data(output_bundle, finish_stream=True)
                                 logger.info(
                                     f"SemanticTurnDetector: Sent partial audio to ASR handler, "
                                     f"length={len(concatenated_audio)} samples, "
                                     f"stream_key={stream_key}"
+                                )
+                                logger.info(
+                                    f"INTERRUPT_TRACE semantic_partial_asr_sent "
+                                    f"session={context.session_id} stream={stream_key_str} "
+                                    f"mono={context.last_partial_asr_request_mono:.6f} "
+                                    f"audio_samples={len(concatenated_audio)} sample_rate={sample_rate} "
+                                    f"since_audio_stream_ms="
+                                    f"{((context.last_partial_asr_request_mono - context.current_audio_stream_start_mono) * 1000 if context.current_audio_stream_start_mono is not None else -1):.1f}"
                                 )
                             else:
                                 logger.warning("SemanticTurnDetector: Output stream was auto-cancelled, skipping partial audio")
@@ -427,6 +458,18 @@ Your response:
             return
 
         logger.info(f"SemanticTurnDetector: Received partial ASR text: {text[:50]}...")
+        partial_text_mono = time.monotonic()
+        since_partial_asr_ms = (
+            (partial_text_mono - context.last_partial_asr_request_mono) * 1000
+            if context.last_partial_asr_request_mono is not None else -1
+        )
+        logger.info(
+            f"INTERRUPT_TRACE semantic_partial_text_received "
+            f"session={context.session_id} "
+            f"stream={inputs.stream_id.stream_key_str if inputs.stream_id else None} "
+            f"mono={partial_text_mono:.6f} since_partial_asr_sent_ms={since_partial_asr_ms:.1f} "
+            f"text_len={len(text)} is_last={inputs.is_last_data}"
+        )
 
         # Check avatar speaking state from VAD metadata
         # VAD records avatar_was_speaking_at_stream_start when entering START state
@@ -539,6 +582,21 @@ Your response:
                 avatar_was_speaking_at_stream_start = inputs.data.metadata.get("avatar_was_speaking_at_stream_start", False)
                 continue_from_stream = inputs.data.metadata.get("continue_from_stream")
 
+        duplex_text_mono = time.monotonic()
+        since_utterance_start_ms = (
+            (duplex_text_mono - context.current_utterance_start_time) * 1000
+            if context.current_utterance_start_time is not None else -1
+        )
+        logger.info(
+            f"INTERRUPT_TRACE semantic_duplex_text_received "
+            f"session={context.session_id} "
+            f"stream={inputs.stream_id.stream_key_str if inputs.stream_id else None} "
+            f"mono={duplex_text_mono:.6f} since_utterance_start_ms={since_utterance_start_ms:.1f} "
+            f"text_len={len(text)} is_last={inputs.is_last_data} "
+            f"avatar_was_speaking_at_start={avatar_was_speaking_at_stream_start} "
+            f"continue_from_stream={continue_from_stream}"
+        )
+
         # Decision logic based on avatar_was_speaking_at_stream_start metadata from VAD
         # This is more accurate than checking session_history because VAD records the state
         # at the exact moment of entering START state
@@ -612,18 +670,43 @@ Your response:
     def _check_interrupt(self, context: SemanticTurnDetectorContext, text: str, inputs: ChatData,
                         output_definitions: Optional[Dict[ChatDataType, HandlerDataInfo]] = None):
         """Check if user wants to interrupt avatar"""
+        check_start_mono = time.monotonic()
+        context.last_interrupt_check_mono = check_start_mono
+        source_type = inputs.type.value if inputs is not None and inputs.type is not None else None
+        source_stream = inputs.stream_id.stream_key_str if inputs is not None and inputs.stream_id else None
+        logger.info(
+            f"INTERRUPT_TRACE interrupt_check_start "
+            f"session={context.session_id} source_type={source_type} stream={source_stream} "
+            f"mono={check_start_mono:.6f} text_len={len(text)} "
+            f"min_text_length={context.config.min_text_length_for_interrupt}"
+        )
         if len(text) < context.config.min_text_length_for_interrupt:
+            logger.info(
+                f"INTERRUPT_TRACE interrupt_check_skip "
+                f"session={context.session_id} reason=text_too_short text_len={len(text)}"
+            )
             return
 
         # Cooldown check
         now = time.monotonic()
         if now - context.last_interrupt_time < context.interrupt_cooldown:
+            logger.info(
+                f"INTERRUPT_TRACE interrupt_check_skip "
+                f"session={context.session_id} reason=cooldown "
+                f"elapsed_ms={(now - context.last_interrupt_time) * 1000:.1f} "
+                f"cooldown_ms={context.interrupt_cooldown * 1000:.1f}"
+            )
             return
 
         # Fast path: Check if it's a pure stop command using heuristic
         # This is more reliable than LLM for obvious stop commands like "stop", "wait a moment", etc.
         if self._is_pure_stop_command(text):
             logger.info(f"SemanticTurnDetector: Detected pure stop command via heuristic, triggering interrupt: {text[:50]}...")
+            logger.info(
+                f"INTERRUPT_TRACE interrupt_check_fast_path "
+                f"session={context.session_id} reason=pure_stop_command "
+                f"since_check_start_ms={(time.monotonic() - check_start_mono) * 1000:.1f}"
+            )
             self._emit_interrupt_and_cancel(context, text, inputs, output_definitions, should_send_text=False)
             return
 
@@ -632,7 +715,13 @@ Your response:
 
         if context.config.interrupt_on_any_speech:
             # Any speech triggers interrupt - judge intent
+            intent_start_mono = time.monotonic()
             intent = self._judge_interrupt_intent(context, text, avatar_text)
+            logger.info(
+                f"INTERRUPT_TRACE interrupt_any_speech_intent_done "
+                f"session={context.session_id} intent={intent} "
+                f"intent_ms={(time.monotonic() - intent_start_mono) * 1000:.1f}"
+            )
             should_send_text = (intent == "has_new_topic")
             self._emit_interrupt_and_cancel(context, text, inputs, output_definitions, should_send_text)
             return
@@ -640,7 +729,13 @@ Your response:
         # Semantic judgment
         if context.llm_client is None:
             # No LLM, fall back to any-speech mode - judge intent
+            intent_start_mono = time.monotonic()
             intent = self._judge_interrupt_intent(context, text, avatar_text)
+            logger.info(
+                f"INTERRUPT_TRACE interrupt_no_llm_intent_done "
+                f"session={context.session_id} intent={intent} "
+                f"intent_ms={(time.monotonic() - intent_start_mono) * 1000:.1f}"
+            )
             should_send_text = (intent == "has_new_topic")
             self._emit_interrupt_and_cancel(context, text, inputs, output_definitions, should_send_text)
             return
@@ -654,11 +749,24 @@ Your response:
 
         try:
             # Start both LLM calls in parallel
+            llm_parallel_start_mono = time.monotonic()
+            logger.info(
+                f"INTERRUPT_TRACE interrupt_llm_parallel_start "
+                f"session={context.session_id} mono={llm_parallel_start_mono:.6f} "
+                f"text_len={len(text)} avatar_text_len={len(avatar_text)}"
+            )
             future_interrupt = executor.submit(self._detect_interrupt_llm, context, text, avatar_text)
             future_intent = executor.submit(self._judge_interrupt_intent, context, text, avatar_text)
 
             # Wait for first call (interrupt detection) to complete
             result_interrupt = future_interrupt.result()
+            detect_done_mono = time.monotonic()
+            logger.info(
+                f"INTERRUPT_TRACE interrupt_llm_detect_done "
+                f"session={context.session_id} result={result_interrupt} "
+                f"detect_wait_ms={(detect_done_mono - llm_parallel_start_mono) * 1000:.1f} "
+                f"since_check_start_ms={(detect_done_mono - check_start_mono) * 1000:.1f}"
+            )
 
             if result_interrupt == "打断":
                 # Interrupt detected - send signal immediately without waiting for intent judgment
@@ -672,6 +780,11 @@ Your response:
                     # Wait for intent judgment to complete (may take time, but interrupt signal already sent)
                     intent = future_intent.result()
                     logger.info(f"SemanticTurnDetector: Intent judgment completed: {intent}")
+                    logger.info(
+                        f"INTERRUPT_TRACE interrupt_intent_done "
+                        f"session={context.session_id} intent={intent} "
+                        f"since_llm_parallel_start_ms={(time.monotonic() - llm_parallel_start_mono) * 1000:.1f}"
+                    )
                 except Exception as e:
                     logger.warning(f"SemanticTurnDetector: Error getting intent result: {e}, using default")
                     intent = "has_new_topic"
@@ -695,6 +808,11 @@ Your response:
                 logger.debug(f"SemanticTurnDetector: No interrupt, user said: {text[:50]}...")
         except Exception as e:
             logger.error(f"SemanticTurnDetector: Error in parallel LLM calls: {e}")
+            logger.info(
+                f"INTERRUPT_TRACE interrupt_llm_parallel_error "
+                f"session={context.session_id} error={type(e).__name__} "
+                f"since_check_start_ms={(time.monotonic() - check_start_mono) * 1000:.1f}"
+            )
             # Fallback to sequential execution on error
             try:
                 result = self._detect_interrupt_llm(context, text, avatar_text)
@@ -735,15 +853,28 @@ Your response:
             )
             logger.info(f"SemanticTurnDetector LLM prompt: {prompt}")
 
+            llm_start_mono = time.monotonic()
+            logger.info(
+                f"INTERRUPT_TRACE llm_interrupt_request_start "
+                f"session={context.session_id} mono={llm_start_mono:.6f} "
+                f"model={context.config.model_name}"
+            )
             response = context.llm_client.chat.completions.create(
                 model=context.config.model_name,
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=10,
                 temperature=0.1
             )
+            llm_done_mono = time.monotonic()
             # Log response details
             result = response.choices[0].message.content.strip()
             logger.info(f"SemanticTurnDetector LLM response: result={result}, model={response.model}")
+            logger.info(
+                f"INTERRUPT_TRACE llm_interrupt_request_done "
+                f"session={context.session_id} mono={llm_done_mono:.6f} "
+                f"model={response.model} result={result} "
+                f"duration_ms={(llm_done_mono - llm_start_mono) * 1000:.1f}"
+            )
             return result
         except Exception as e:
             # Log detailed error info
@@ -913,6 +1044,10 @@ Your response:
         # This is a fast path that doesn't require LLM
         if self._is_pure_stop_command(interrupt_text):
             logger.info(f"SemanticTurnDetector: Detected pure stop command via heuristic: {interrupt_text[:50]}...")
+            logger.info(
+                f"INTERRUPT_TRACE interrupt_intent_fast_path "
+                f"session={context.session_id} reason=pure_stop_command"
+            )
             return "pure_interrupt"
 
         if context.interrupt_judge_llm_client is None:
@@ -932,6 +1067,12 @@ Your response:
                 f"interrupt_text={interrupt_text[:50]}..."
             )
 
+            intent_start_mono = time.monotonic()
+            logger.info(
+                f"INTERRUPT_TRACE llm_intent_request_start "
+                f"session={context.session_id} mono={intent_start_mono:.6f} "
+                f"model={context.config.interrupt_judge_model_name}"
+            )
             response = context.interrupt_judge_llm_client.chat.completions.create(
                 model=context.config.interrupt_judge_model_name,
                 messages=[{"role": "user", "content": prompt}],
@@ -941,8 +1082,15 @@ Your response:
                 extra_body={"chat_template_kwargs": {"enable_thinking": False}}
             )
 
+            intent_done_mono = time.monotonic()
             result = response.choices[0].message.content.strip()
             logger.info(f"SemanticTurnDetector: Interrupt intent judgment response: {result}")
+            logger.info(
+                f"INTERRUPT_TRACE llm_intent_request_done "
+                f"session={context.session_id} mono={intent_done_mono:.6f} "
+                f"model={response.model} duration_ms={(intent_done_mono - intent_start_mono) * 1000:.1f} "
+                f"raw_result={result}"
+            )
 
             # Remove <think>...</think> tags if present (some models may still include them)
             import re
@@ -999,23 +1147,47 @@ Your response:
             should_send_text: Whether to send trigger_text as HUMAN_TEXT to downstream LLM
         """
         logger.info(f"SemanticTurnDetector: Triggering interrupt, user said: {trigger_text[:50]}..., should_send_text={should_send_text}")
+        emit_start_mono = time.monotonic()
+        since_check_start_ms = (
+            (emit_start_mono - context.last_interrupt_check_mono) * 1000
+            if context.last_interrupt_check_mono is not None else -1
+        )
+        logger.info(
+            f"INTERRUPT_TRACE interrupt_emit_attempt "
+            f"session={context.session_id} mono={emit_start_mono:.6f} "
+            f"since_check_start_ms={since_check_start_ms:.1f} "
+            f"trigger_text_len={len(trigger_text)} should_send_text={should_send_text}"
+        )
 
         context.last_interrupt_time = time.monotonic()
 
         # Check if there are active playback streams to interrupt
         has_active_playback = False
+        active_playback_count = -1
         if context.stream_manager:
             active_playback = [
                 s for s in context.stream_manager.get_active_streams()
                 if s.identity.data_type == ChatDataType.CLIENT_PLAYBACK
             ]
-            has_active_playback = len(active_playback) > 0
+            active_playback_count = len(active_playback)
+            has_active_playback = active_playback_count > 0
         elif context.session_history is not None:
             active_playback_events = context.session_history.get_active_avatar_streams()
+            active_playback_count = len(active_playback_events)
             has_active_playback = bool(active_playback_events)
+        logger.info(
+            f"INTERRUPT_TRACE interrupt_active_playback_check "
+            f"session={context.session_id} has_active_playback={has_active_playback} "
+            f"active_playback_count={active_playback_count}"
+        )
 
         if not has_active_playback:
             logger.debug("SemanticTurnDetector: No active playback streams to interrupt")
+            logger.info(
+                f"INTERRUPT_TRACE interrupt_emit_skip "
+                f"session={context.session_id} reason=no_active_playback "
+                f"since_emit_attempt_ms={(time.monotonic() - emit_start_mono) * 1000:.1f}"
+            )
             if should_send_text and output_definitions and ChatDataType.HUMAN_TEXT in output_definitions:
                 if inputs is not None:
                     logger.info(f"SemanticTurnDetector: Avatar finished, sending text without interrupt: {trigger_text[:50]}...")
@@ -1033,6 +1205,11 @@ Your response:
             }
         )
         context.emit_signal(interrupt_signal)
+        logger.info(
+            f"INTERRUPT_TRACE interrupt_signal_emitted "
+            f"session={context.session_id} mono={time.monotonic():.6f} "
+            f"since_emit_attempt_ms={(time.monotonic() - emit_start_mono) * 1000:.1f}"
+        )
 
         # If interrupt carries new topic, send trigger_text as HUMAN_TEXT to downstream LLM
         if should_send_text and output_definitions and ChatDataType.HUMAN_TEXT in output_definitions:

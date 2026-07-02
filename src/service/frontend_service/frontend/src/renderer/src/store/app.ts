@@ -26,6 +26,10 @@ interface AppState {
   inputVisible: boolean
   avatarCloneEnabled: boolean
   avatarCloneUploadRoute: string
+  voiceCloneEnabled: boolean
+  voiceCloneUploadRoute: string
+  voiceCloneResetRoute: string
+  voiceCloneSampleText: string
 }
 
 export const useAppStore = defineStore('appStore', {
@@ -41,6 +45,10 @@ export const useAppStore = defineStore('appStore', {
     inputVisible: true,
     avatarCloneEnabled: false,
     avatarCloneUploadRoute: '',
+    voiceCloneEnabled: false,
+    voiceCloneUploadRoute: '',
+    voiceCloneResetRoute: '',
+    voiceCloneSampleText: '',
   }),
   actions: {
     async init() {
@@ -60,6 +68,10 @@ export const useAppStore = defineStore('appStore', {
           }
           this.avatarCloneEnabled = Boolean(config.avatar_clone?.enabled)
           this.avatarCloneUploadRoute = config.avatar_clone?.upload_route || ''
+          this.voiceCloneEnabled = Boolean(config.voice_clone?.enabled)
+          this.voiceCloneUploadRoute = config.voice_clone?.upload_route || ''
+          this.voiceCloneResetRoute = config.voice_clone?.reset_route || ''
+          this.voiceCloneSampleText = config.voice_clone?.sample_text || ''
           config.avatar_config = config.avatar_config || {}
           if (config.avatar_config) {
             this.avatarType = config.avatar_config.avatar_type || ''

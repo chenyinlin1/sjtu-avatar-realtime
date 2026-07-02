@@ -1,6 +1,7 @@
 
 
 import re
+import time
 from typing import Dict, Optional, cast
 from loguru import logger
 import numpy as np
@@ -36,6 +37,9 @@ class ASRContext(HandlerContext):
             slice_axis=0,
         )
         self.cache = {}
+        self.current_audio_stream_key: Optional[str] = None
+        self.current_asr_stream_start_mono: Optional[float] = None
+        self.current_asr_audio_samples: int = 0
 
         self.dump_audio = True
         self.audio_dump_file = None
@@ -111,8 +115,20 @@ class HandlerASR(HandlerBase, ABC):
         else:
             return
 
+        stream_key = inputs.stream_id.stream_key_str if inputs.stream_id else None
+        if stream_key != context.current_audio_stream_key or context.current_asr_stream_start_mono is None:
+            context.current_audio_stream_key = stream_key
+            context.current_asr_stream_start_mono = time.monotonic()
+            context.current_asr_audio_samples = 0
+            logger.info(
+                f"INTERRUPT_TRACE asr_audio_stream_begin "
+                f"session={context.session_id} stream={stream_key} "
+                f"mono={context.current_asr_stream_start_mono:.6f} input_type={inputs.type.value}"
+            )
+
         if audio is not None:
             audio = audio.squeeze()
+            context.current_asr_audio_samples += int(audio.shape[0])
 
             logger.info('audio in')
             for audio_segment in slice_data(context.audio_slice_context, audio):
@@ -137,10 +153,29 @@ class HandlerASR(HandlerBase, ABC):
             logger.info('dump audio')
             context.audio_dump_file.write(output_audio.tobytes())
 
+        asr_start_mono = time.monotonic()
+        since_stream_start_ms = (
+            (asr_start_mono - context.current_asr_stream_start_mono) * 1000
+            if context.current_asr_stream_start_mono is not None else -1
+        )
+        logger.info(
+            f"INTERRUPT_TRACE asr_generate_start "
+            f"session={context.session_id} stream={context.current_audio_stream_key} "
+            f"mono={asr_start_mono:.6f} accumulated_samples={output_audio.shape[0]} "
+            f"received_samples={context.current_asr_audio_samples} "
+            f"since_stream_start_ms={since_stream_start_ms:.1f}"
+        )
         res = self.model.generate(input=output_audio, batch_size_s=10)
+        asr_done_mono = time.monotonic()
         logger.info(res)
         context.output_audios.clear()
         output_text = re.sub(r"<\|.*?\|>", "", res[0]['text'])
+        logger.info(
+            f"INTERRUPT_TRACE asr_generate_done "
+            f"session={context.session_id} stream={context.current_audio_stream_key} "
+            f"mono={asr_done_mono:.6f} duration_ms={(asr_done_mono - asr_start_mono) * 1000:.1f} "
+            f"output_text_len={len(output_text)}"
+        )
         if len(output_text) == 0:
             return
         output = DataBundle(output_definition)

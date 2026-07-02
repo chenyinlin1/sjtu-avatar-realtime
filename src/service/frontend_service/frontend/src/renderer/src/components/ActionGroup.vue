@@ -88,6 +88,13 @@
       :stream-state="streamState"
       :upload-route="avatarCloneUploadRoute"
     />
+    <VoiceCloneControl
+      v-if="voiceCloneEnabled"
+      :stream-state="streamState"
+      :upload-route="voiceCloneUploadRoute"
+      :reset-route="voiceCloneResetRoute"
+      :sample-text="voiceCloneSampleText"
+    />
     <div
       :class="['action', 'interrupt-action', { active: canInterrupt, disabled: !canInterrupt }]"
       :title="canInterrupt ? '打断当前回复' : '当前没有可打断的回复'"
@@ -119,6 +126,7 @@ import { useWSVideoChatStore } from '@/store/ws'
 import { useAppStore } from '@/store/app'
 import { useVisionStore } from '@/store/vision'
 import AvatarCloneControl from './AvatarCloneControl.vue'
+import VoiceCloneControl from './VoiceCloneControl.vue'
 import Iconfont, {
   CameraOff,
   CameraOn,
@@ -151,7 +159,14 @@ const {
 } = storeToRefs(mediaStore)
 
 const { volumeMuted, showChatRecords, replying } = storeToRefs(chatStore)
-const { avatarCloneEnabled, avatarCloneUploadRoute } = storeToRefs(appStore)
+const {
+  avatarCloneEnabled,
+  avatarCloneUploadRoute,
+  voiceCloneEnabled,
+  voiceCloneUploadRoute,
+  voiceCloneResetRoute,
+  voiceCloneSampleText,
+} = storeToRefs(appStore)
 const streamState = computed(() =>
   appStore.chatMode === 'ws' ? wsChatStore.streamState : videoChatStore.streamState
 )

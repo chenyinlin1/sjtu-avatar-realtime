@@ -10,6 +10,7 @@ Responsibilities:
 - Cancel the appropriate stream chains via StreamManager
 - Record interrupt events in session history
 """
+import time
 from typing import Optional, Dict, cast
 
 from loguru import logger
@@ -85,6 +86,13 @@ class InterruptHandler(HandlerBase):
             f"source_type={signal.source_type}, source_name={signal.source_name}, "
             f"related_stream={signal.related_stream}"
         )
+        received_mono = time.monotonic()
+        logger.info(
+            f"INTERRUPT_TRACE interrupt_handler_received "
+            f"session={context.session_id} mono={received_mono:.6f} "
+            f"source_type={signal.source_type} source_name={signal.source_name} "
+            f"related_stream={signal.related_stream}"
+        )
 
         target_stream = signal.related_stream
 
@@ -98,6 +106,11 @@ class InterruptHandler(HandlerBase):
                 target_stream = active_playback[0].identity
             elif len(active_playback) == 0:
                 logger.debug("InterruptHandler: No active playback streams to cancel")
+                logger.info(
+                    f"INTERRUPT_TRACE interrupt_handler_no_active_playback "
+                    f"session={context.session_id} "
+                    f"since_received_ms={(time.monotonic() - received_mono) * 1000:.1f}"
+                )
                 return
 
         # Cancel streams via StreamManager
@@ -109,10 +122,21 @@ class InterruptHandler(HandlerBase):
                     f"InterruptHandler: cancel_stream_chain({target_stream.stream_key_str}) "
                     f"cancelled {len(cancelled)} streams"
                 )
+                logger.info(
+                    f"INTERRUPT_TRACE interrupt_handler_cancel_done "
+                    f"session={context.session_id} mode=chain target_stream={target_stream.stream_key_str} "
+                    f"cancelled_count={len(cancelled)} "
+                    f"since_received_ms={(time.monotonic() - received_mono) * 1000:.1f}"
+                )
             else:
                 cancelled = context.stream_manager.cancel_streams_by_type(ChatDataType.CLIENT_PLAYBACK)
                 logger.info(
                     f"InterruptHandler: cancel_streams_by_type cancelled {len(cancelled)} streams"
+                )
+                logger.info(
+                    f"INTERRUPT_TRACE interrupt_handler_cancel_done "
+                    f"session={context.session_id} mode=by_type cancelled_count={len(cancelled)} "
+                    f"since_received_ms={(time.monotonic() - received_mono) * 1000:.1f}"
                 )
 
         # Record interrupt event in history
