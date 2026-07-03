@@ -783,6 +783,22 @@ Your response:
                 f"INTERRUPT_TRACE interrupt_check_skip "
                 f"session={context.session_id} reason=text_too_short text_len={len(text)}"
             )
+            if self._should_submit_barge_in_text_after_interrupt(
+                context,
+                text,
+                inputs,
+                output_definitions,
+                allow_short_text=True,
+            ):
+                logger.info(
+                    f"SemanticTurnDetector: Submitting short speech-start barge-in text: {text[:50]}..."
+                )
+                logger.info(
+                    f"INTERRUPT_TRACE interrupt_short_text_passthrough "
+                    f"session={context.session_id} stream={source_stream} "
+                    f"since_check_start_ms={(time.monotonic() - check_start_mono) * 1000:.1f}"
+                )
+                self._submit_human_text(context, text, inputs, output_definitions)
             return
 
         # Cooldown check
@@ -794,6 +810,22 @@ Your response:
                 f"elapsed_ms={(now - context.last_interrupt_time) * 1000:.1f} "
                 f"cooldown_ms={context.interrupt_cooldown * 1000:.1f}"
             )
+            if self._should_submit_barge_in_text_after_interrupt(
+                context,
+                text,
+                inputs,
+                output_definitions,
+            ):
+                logger.info(
+                    f"SemanticTurnDetector: Submitting speech-start barge-in text during interrupt cooldown: "
+                    f"{text[:50]}..."
+                )
+                logger.info(
+                    f"INTERRUPT_TRACE interrupt_cooldown_passthrough "
+                    f"session={context.session_id} stream={source_stream} "
+                    f"since_check_start_ms={(time.monotonic() - check_start_mono) * 1000:.1f}"
+                )
+                self._submit_human_text(context, text, inputs, output_definitions)
             return
 
         # Fast path: Check if it's a pure stop command using heuristic
@@ -888,9 +920,25 @@ Your response:
                     intent = "has_new_topic"
 
                 # If intent is has_new_topic, send HUMAN_TEXT to downstream LLM
-                if intent == "has_new_topic" and output_definitions and ChatDataType.HUMAN_TEXT in output_definitions:
+                should_submit_text = (
+                    intent == "has_new_topic"
+                    or self._should_submit_barge_in_text_after_interrupt(
+                        context,
+                        text,
+                        inputs,
+                        output_definitions,
+                    )
+                )
+                if should_submit_text and output_definitions and ChatDataType.HUMAN_TEXT in output_definitions:
                     if inputs is not None:
                         logger.info(f"SemanticTurnDetector: Interrupt has new topic, sending trigger text as HUMAN_TEXT: {text[:50]}...")
+                        if intent != "has_new_topic":
+                            logger.info(
+                                f"INTERRUPT_TRACE interrupt_pure_with_barge_in_text_passthrough "
+                                f"session={context.session_id} stream={source_stream} "
+                                f"intent={intent} "
+                                f"since_check_start_ms={(time.monotonic() - check_start_mono) * 1000:.1f}"
+                            )
                         self._submit_human_text(context, text, inputs, output_definitions)
                     else:
                         logger.warning("SemanticTurnDetector: Cannot send HUMAN_TEXT - inputs is None")
@@ -904,7 +952,7 @@ Your response:
                     else:
                         logger.debug("SemanticTurnDetector: Could not cancel intent judgment call (may already be running)")
                 logger.debug(f"SemanticTurnDetector: No interrupt, user said: {text[:50]}...")
-                if self._should_passthrough_after_speech_start_barge_in(
+                if self._should_submit_barge_in_text_after_interrupt(
                     context,
                     text,
                     inputs,
@@ -940,12 +988,13 @@ Your response:
             # Shutdown executor without waiting (let background tasks complete)
             executor.shutdown(wait=False)
 
-    def _should_passthrough_after_speech_start_barge_in(
+    def _should_submit_barge_in_text_after_interrupt(
         self,
         context: SemanticTurnDetectorContext,
         text: str,
         inputs: Optional[ChatData],
         output_definitions: Optional[Dict[ChatDataType, HandlerDataInfo]],
+        allow_short_text: bool = False,
     ) -> bool:
         if inputs is None or not inputs.is_last_data:
             return False
@@ -955,9 +1004,30 @@ Your response:
         if not metadata.get("speech_start_barge_in_triggered"):
             return False
         text_clean = text.strip().strip(".,!?。，！？")
-        if len(text_clean) < context.config.min_text_length_for_interrupt:
+        if not text_clean:
             return False
-        return not self._is_low_information_utterance(text_clean)
+        if (
+            len(text_clean) < context.config.min_text_length_for_interrupt
+            and not allow_short_text
+        ):
+            return False
+        if self._is_low_information_utterance(text_clean):
+            return False
+        return not self._is_pure_stop_command(text_clean)
+
+    def _should_passthrough_after_speech_start_barge_in(
+        self,
+        context: SemanticTurnDetectorContext,
+        text: str,
+        inputs: Optional[ChatData],
+        output_definitions: Optional[Dict[ChatDataType, HandlerDataInfo]],
+    ) -> bool:
+        return self._should_submit_barge_in_text_after_interrupt(
+            context,
+            text,
+            inputs,
+            output_definitions,
+        )
 
     def _detect_interrupt_llm(self, context: SemanticTurnDetectorContext, user_text: str, avatar_text: str) -> str:
         """Use LLM to detect if user wants to interrupt
@@ -1149,6 +1219,7 @@ Your response:
             '暂停', '暂停一下',
             '等等', '等一下', '等一等', '等会',
             '别说了', '不要说了', '别讲了', '不要讲了',
+            '别说话', '别说话了', '不要说话', '不要说话了',
             '够了', '可以了', '好了', '行了',
             '安静', '闭嘴',
         }
@@ -1157,11 +1228,22 @@ Your response:
         if text_clean in stop_commands_en or text_clean in stop_commands_zh:
             return True
 
-        # Check if text starts with stop command and is short (less than 30 chars)
-        if len(text_clean) < 30:
-            for cmd in stop_commands_en | stop_commands_zh:
-                if text_clean.startswith(cmd) or text_clean.endswith(cmd):
-                    return True
+        prefix_tokens = (
+            "好的", "好", "那", "哎", "诶", "欸", "呃", "嗯",
+            "请你", "请", "你先", "你", "先",
+        )
+        trimmed = text_clean
+        changed = True
+        while changed:
+            changed = False
+            for prefix in prefix_tokens:
+                if trimmed.startswith(prefix) and len(trimmed) > len(prefix):
+                    trimmed = trimmed[len(prefix):].strip()
+                    changed = True
+                    break
+
+        if trimmed in stop_commands_en or trimmed in stop_commands_zh:
+            return True
 
         return False
 

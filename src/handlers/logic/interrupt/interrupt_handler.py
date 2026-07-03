@@ -11,7 +11,7 @@ Responsibilities:
 - Record interrupt events in session history
 """
 import time
-from typing import Optional, Dict, cast
+from typing import Optional, Dict, List, cast
 
 from loguru import logger
 
@@ -76,6 +76,48 @@ class InterruptHandler(HandlerBase):
                output_definitions: Dict[ChatDataType, HandlerDataInfo]):
         pass
 
+    def _is_tts_avatar_audio(self, stream_identity) -> bool:
+        """Return True for upstream TTS audio, not FlashHead's passthrough audio."""
+        if stream_identity.data_type != ChatDataType.AVATAR_AUDIO:
+            return False
+        producer_name = stream_identity.producer_name or ""
+        if producer_name == "FlashHead" and not stream_identity.name:
+            return False
+        return True
+
+    def _get_avatar_response_cancel_targets(self, active_streams) -> List:
+        targets = []
+        seen_keys = set()
+
+        def add(identity):
+            if identity.key in seen_keys:
+                return
+            seen_keys.add(identity.key)
+            targets.append(identity)
+
+        # Stop old LLM generation first, then TTS, then currently opened playback.
+        for data_type in (ChatDataType.AVATAR_TEXT,):
+            for stream in active_streams:
+                if stream.identity.data_type == data_type:
+                    add(stream.identity)
+
+        for stream in active_streams:
+            if self._is_tts_avatar_audio(stream.identity):
+                add(stream.identity)
+
+        for stream in active_streams:
+            if stream.identity.data_type == ChatDataType.CLIENT_PLAYBACK:
+                add(stream.identity)
+
+        # FlashHead passthrough AVATAR_AUDIO does not stop upstream TTS, but it is
+        # still useful as a final cleanup target when it is the only active output.
+        for stream in active_streams:
+            identity = stream.identity
+            if identity.data_type == ChatDataType.AVATAR_AUDIO and identity.key not in seen_keys:
+                add(identity)
+
+        return targets
+
     def on_signal(self, context: HandlerContext, signal: ChatSignal):
         """Handle INTERRUPT signals by cancelling the appropriate streams."""
         if signal.type != ChatSignalType.INTERRUPT:
@@ -95,28 +137,15 @@ class InterruptHandler(HandlerBase):
         )
 
         target_stream = signal.related_stream
-        cancel_data_type = None
+        cancel_targets = []
 
-        # If no related_stream specified, cancel by avatar response priority.
+        # If no related_stream is specified, cancel every active avatar response
+        # stream. A single response may have multiple sibling TTS/playback streams.
         if target_stream is None and context.stream_manager:
             active_streams = context.stream_manager.get_active_streams()
-            for data_type in (
-                ChatDataType.CLIENT_PLAYBACK,
-                ChatDataType.AVATAR_AUDIO,
-                ChatDataType.AVATAR_TEXT,
-            ):
-                candidates = [
-                    s for s in active_streams
-                    if s.identity.data_type == data_type
-                ]
-                if len(candidates) == 1:
-                    target_stream = candidates[0].identity
-                    break
-                if len(candidates) > 1:
-                    cancel_data_type = data_type
-                    break
+            cancel_targets = self._get_avatar_response_cancel_targets(active_streams)
 
-            if target_stream is None and cancel_data_type is None:
+            if not cancel_targets:
                 logger.debug("InterruptHandler: No active avatar response streams to cancel")
                 logger.info(
                     f"INTERRUPT_TRACE interrupt_handler_no_active_avatar_response "
@@ -141,15 +170,21 @@ class InterruptHandler(HandlerBase):
                     f"since_received_ms={(time.monotonic() - received_mono) * 1000:.1f}"
                 )
             else:
-                cancel_data_type = cancel_data_type or ChatDataType.CLIENT_PLAYBACK
-                cancelled = context.stream_manager.cancel_streams_by_type(cancel_data_type)
+                cancelled_keys = set()
+                for stream in cancel_targets:
+                    result = context.stream_manager.cancel_stream_chain(stream)
+                    for sid in result:
+                        if sid.key not in cancelled_keys:
+                            cancelled_keys.add(sid.key)
+                            cancelled.append(sid)
                 logger.info(
-                    f"InterruptHandler: cancel_streams_by_type({cancel_data_type}) "
-                    f"cancelled {len(cancelled)} streams"
+                    f"InterruptHandler: cancel_avatar_response_targets "
+                    f"targets={len(cancel_targets)} cancelled {len(cancelled)} streams"
                 )
                 logger.info(
                     f"INTERRUPT_TRACE interrupt_handler_cancel_done "
-                    f"session={context.session_id} mode=by_type target_type={cancel_data_type} "
+                    f"session={context.session_id} mode=avatar_response_targets "
+                    f"target_count={len(cancel_targets)} "
                     f"cancelled_count={len(cancelled)} "
                     f"since_received_ms={(time.monotonic() - received_mono) * 1000:.1f}"
                 )

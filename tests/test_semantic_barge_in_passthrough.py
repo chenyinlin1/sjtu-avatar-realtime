@@ -39,6 +39,11 @@ class RecordingSemanticTurnDetector(SemanticTurnDetectorHandler):
         self.submitted_texts.append(text)
 
 
+class RecordingDetectedInterruptSemanticTurnDetector(RecordingSemanticTurnDetector):
+    def _detect_interrupt_llm(self, context, user_text, avatar_text):
+        return "打断"
+
+
 def test_speech_start_barge_in_marks_human_audio_stream_as_preempted():
     handler = RecordingSemanticTurnDetector()
     context = SemanticTurnDetectorContext("test-session")
@@ -108,3 +113,93 @@ def test_no_interrupt_result_submits_text_after_speech_start_barge_in():
     )
 
     assert handler.submitted_texts == ["哎我打断之后你好像就不会说话了"]
+
+
+def test_pure_interrupt_classification_still_submits_barge_in_request_text():
+    handler = RecordingDetectedInterruptSemanticTurnDetector()
+    context = SemanticTurnDetectorContext("test-session")
+    context.llm_client = object()
+
+    inputs = ChatData(
+        type=ChatDataType.HUMAN_DUPLEX_TEXT,
+        stream_id=ChatStreamIdentity(
+            data_type=ChatDataType.HUMAN_DUPLEX_TEXT,
+            builder_id=31,
+            stream_id=6,
+            producer_name="SenseVoice",
+        ),
+        data=_text_bundle(
+            "好你不要说话了换个别的话说",
+            avatar_was_speaking_at_stream_start=True,
+            speech_start_barge_in_triggered=True,
+        ),
+        is_last_data=True,
+    )
+
+    handler._handle_duplex_text(
+        context,
+        inputs,
+        {ChatDataType.HUMAN_TEXT: SimpleNamespace()},
+    )
+
+    assert handler.submitted_texts == ["好你不要说话了换个别的话说"]
+
+
+def test_short_substantive_barge_in_text_is_submitted():
+    handler = RecordingDetectedInterruptSemanticTurnDetector()
+    context = SemanticTurnDetectorContext("test-session")
+    context.llm_client = object()
+
+    inputs = ChatData(
+        type=ChatDataType.HUMAN_DUPLEX_TEXT,
+        stream_id=ChatStreamIdentity(
+            data_type=ChatDataType.HUMAN_DUPLEX_TEXT,
+            builder_id=32,
+            stream_id=7,
+            producer_name="SenseVoice",
+        ),
+        data=_text_bundle(
+            "对",
+            avatar_was_speaking_at_stream_start=True,
+            speech_start_barge_in_triggered=True,
+        ),
+        is_last_data=True,
+    )
+
+    handler._handle_duplex_text(
+        context,
+        inputs,
+        {ChatDataType.HUMAN_TEXT: SimpleNamespace()},
+    )
+
+    assert handler.submitted_texts == ["对"]
+
+
+def test_pure_stop_barge_in_text_is_not_submitted():
+    handler = RecordingDetectedInterruptSemanticTurnDetector()
+    context = SemanticTurnDetectorContext("test-session")
+    context.llm_client = object()
+
+    inputs = ChatData(
+        type=ChatDataType.HUMAN_DUPLEX_TEXT,
+        stream_id=ChatStreamIdentity(
+            data_type=ChatDataType.HUMAN_DUPLEX_TEXT,
+            builder_id=33,
+            stream_id=8,
+            producer_name="SenseVoice",
+        ),
+        data=_text_bundle(
+            "好你不要说话了",
+            avatar_was_speaking_at_stream_start=True,
+            speech_start_barge_in_triggered=True,
+        ),
+        is_last_data=True,
+    )
+
+    handler._handle_duplex_text(
+        context,
+        inputs,
+        {ChatDataType.HUMAN_TEXT: SimpleNamespace()},
+    )
+
+    assert handler.submitted_texts == []
