@@ -1,6 +1,6 @@
 [project]
 name = "open-video-chat"
-version = "0.1.1"
+version = "0.1.0"
 description = "A modular interactive digital human conversation implementation that runs full-featured on a single PC."
 readme = "README.md"
 requires-python = ">=3.11.7, <3.12"
