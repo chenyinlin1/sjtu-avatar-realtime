@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { nanoid } from 'nanoid'
+import { markRaw } from 'vue'
 
 import EventEmitter from 'eventemitter3'
 
@@ -14,11 +15,36 @@ interface AvatarLike {
   interrupt?(): void
 }
 
+type MusicClientAction =
+  | {
+      type: 'music.play'
+      title?: string
+      artist?: string
+      url?: string
+      source?: string
+      query?: string
+      candidates?: Array<Record<string, unknown>>
+    }
+  | {
+      type: 'music.control'
+      action?: 'pause' | 'resume' | 'next' | 'volume' | 'mute' | 'unmute' | 'stop' | string
+      delta?: number
+    }
+
+interface TextPayloadWithClientAction extends Partial<TextPayload> {
+  metadata?: TextPayload['metadata'] & {
+    client_action?: MusicClientAction
+  }
+}
+
 interface ChatState {
   volumeMuted: boolean
   showChatRecords: boolean
   replying: boolean
   activeRenderer: AvatarLike | null
+  musicAudio: HTMLAudioElement | null
+  musicVolume: number
+  musicMuted: boolean
 }
 
 export const useChatStore = defineStore('chatStore', {
@@ -27,6 +53,9 @@ export const useChatStore = defineStore('chatStore', {
     showChatRecords: false,
     replying: false,
     activeRenderer: null,
+    musicAudio: null,
+    musicVolume: 1,
+    musicMuted: false,
   }),
   actions: {
     setActiveRenderer(renderer: AvatarLike | null) {
@@ -51,6 +80,96 @@ export const useChatStore = defineStore('chatStore', {
       wrapperRect.width = wrapperRef.clientWidth
       wrapperRect.height = wrapperRef.clientHeight
       visionState.isLandscape = wrapperRect.width > wrapperRect.height
+    },
+
+    getClientAction(payload?: TextPayloadWithClientAction): MusicClientAction | undefined {
+      const action = payload?.metadata?.client_action
+      if (!action || typeof action !== 'object' || typeof action.type !== 'string') return undefined
+      return action
+    },
+
+    handleClientAction(payload?: TextPayloadWithClientAction): boolean {
+      const action = this.getClientAction(payload)
+      if (!action) return false
+      if (action.type === 'music.play') {
+        this.playMusicAction(action)
+        return true
+      }
+      if (action.type === 'music.control') {
+        this.controlMusicAction(action)
+        return true
+      }
+      return false
+    },
+
+    playMusicAction(action: Extract<MusicClientAction, { type: 'music.play' }>) {
+      if (!action.url) {
+        console.warn('music.play action missing url', action)
+        return
+      }
+      if (this.musicAudio) {
+        this.musicAudio.pause()
+        this.musicAudio.src = ''
+      }
+      const audio = markRaw(new Audio(action.url))
+      audio.preload = 'auto'
+      audio.volume = this.musicVolume
+      audio.muted = this.musicMuted
+      audio.addEventListener('ended', () => {
+        if (this.musicAudio === audio) {
+          this.musicAudio = null
+        }
+      })
+      this.musicAudio = audio
+      audio.play().catch((e) => {
+        console.error('music.play failed', e)
+      })
+    },
+
+    controlMusicAction(action: Extract<MusicClientAction, { type: 'music.control' }>) {
+      const audio = this.musicAudio
+      switch (action.action) {
+        case 'pause':
+          audio?.pause()
+          break
+        case 'resume':
+          audio?.play().catch((e) => {
+            console.error('music.resume failed', e)
+          })
+          break
+        case 'stop':
+          if (audio) {
+            audio.pause()
+            audio.src = ''
+          }
+          this.musicAudio = null
+          break
+        case 'next':
+          if (audio) {
+            audio.pause()
+            if (Number.isFinite(audio.duration)) {
+              audio.currentTime = audio.duration
+            }
+          }
+          this.musicAudio = null
+          break
+        case 'volume': {
+          const delta = typeof action.delta === 'number' ? action.delta : 0
+          this.musicVolume = Math.min(1, Math.max(0, this.musicVolume + delta))
+          if (audio) audio.volume = this.musicVolume
+          break
+        }
+        case 'mute':
+          this.musicMuted = true
+          if (audio) audio.muted = true
+          break
+        case 'unmute':
+          this.musicMuted = false
+          if (audio) audio.muted = false
+          break
+        default:
+          console.warn('Unsupported music.control action', action)
+      }
     },
 
     updateChatRecords(
@@ -149,7 +268,10 @@ export const useChatStore = defineStore('chatStore', {
           payload?: Partial<TextPayload>
         }
         const { payload, role } = eventData || {}
-        if (!payload || typeof payload.text !== 'string') return
+        if (!payload) return
+        const consumedClientAction = this.handleClientAction(payload as TextPayloadWithClientAction)
+        if (typeof payload.text !== 'string') return
+        if (consumedClientAction && !payload.text) return
 
         this.updateChatRecords(
           { ...payload, role: role === 'human' ? 'human' : 'avatar' },

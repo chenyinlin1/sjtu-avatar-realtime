@@ -16,6 +16,10 @@ class GetCurrentTimeTool(BaseTool):
     """Returns the current time and date."""
 
     @property
+    def category(self) -> str:
+        return "system"
+
+    @property
     def name(self) -> str:
         return "get_current_time"
 
@@ -67,6 +71,10 @@ class GetSystemInfoTool(BaseTool):
     """Returns basic system information."""
 
     @property
+    def category(self) -> str:
+        return "system"
+
+    @property
     def name(self) -> str:
         return "get_system_info"
 
@@ -92,3 +100,8 @@ class GetSystemInfoTool(BaseTool):
                 "python_version": platform.python_version(),
             },
         )
+
+
+def register_tools(registry, **_kwargs) -> None:
+    registry.register(GetCurrentTimeTool())
+    registry.register(GetSystemInfoTool())

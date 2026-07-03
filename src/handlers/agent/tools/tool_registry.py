@@ -6,7 +6,7 @@ to the LLM through a single consistent interface.
 """
 
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from loguru import logger
 
@@ -16,11 +16,26 @@ from handlers.agent.tools.base_tool import BaseTool, ToolResult
 class ToolRegistry:
     """Manages registered tools and provides schemas for LLM function calling."""
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        strict_schema: bool = False,
+        enabled_tools: Optional[Iterable[str]] = None,
+        disabled_tools: Optional[Iterable[str]] = None,
+    ):
         self._tools: Dict[str, BaseTool] = {}
         self._schemas_cache: Optional[List[dict]] = None
+        self._strict_schema = strict_schema
+        self._enabled_tools = set(enabled_tools or [])
+        self._disabled_tools = set(disabled_tools or [])
 
     def register(self, tool: BaseTool) -> None:
+        if self._enabled_tools and tool.name not in self._enabled_tools:
+            logger.info(f"[ToolRegistry] Skipped disabled-by-allowlist tool: {tool.name}")
+            return
+        if tool.name in self._disabled_tools:
+            logger.info(f"[ToolRegistry] Skipped disabled tool: {tool.name}")
+            return
         if tool.name in self._tools:
             logger.warning(f"[ToolRegistry] Overwriting existing tool: {tool.name}")
         self._tools[tool.name] = tool
@@ -49,7 +64,8 @@ class ToolRegistry:
         """Return OpenAI-format tool schemas for all registered tools."""
         if self._schemas_cache is None:
             self._schemas_cache = [
-                tool.get_openai_schema() for tool in self._tools.values()
+                tool.get_openai_schema(strict=self._strict_schema)
+                for tool in self._tools.values()
             ]
         return self._schemas_cache
 

@@ -178,6 +178,11 @@ default:
           enabled: true
           max_tool_rounds: 5
           register_demo_tools: true
+          strict_schema: false
+          tool_modules:
+            - "handlers.agent.tools.demo_tools"
+            - "handlers.agent.tools.web_search"
+            - "handlers.agent.tools.music_request"
         # OpenClaw Bridge — Plugin Tools MCP + oac-bridge HTTP 通道
         oc_bridge:
           enabled: true
