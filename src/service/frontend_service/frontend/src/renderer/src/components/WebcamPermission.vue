@@ -37,15 +37,22 @@ const text = computed(() => {
   }
   return isAudioOnly.value ? '点击允许访问麦克风' : '点击允许访问摄像头和麦克风'
 })
+
+const title = computed(() => (isAudioOnly.value ? '需要麦克风权限' : '需要摄像头和麦克风权限'))
 </script>
 
 <template>
-  <div class="access-wrap" @click="accessClick">
-    <span class="icon-wrap">
-      <AudioOutlined v-if="isAudioOnly" />
-      <VideoCameraOutlined v-else />
-    </span>
-    {{ text }}
+  <div class="access-wrap" role="button" :aria-busy="requesting" @click="accessClick">
+    <section class="access-card">
+      <span class="icon-wrap">
+        <AudioOutlined v-if="isAudioOnly" />
+        <VideoCameraOutlined v-else />
+      </span>
+      <div class="access-eyebrow">FlashHead AI 助教</div>
+      <h1>{{ title }}</h1>
+      <p>{{ text }}</p>
+      <span class="access-button">{{ requesting ? '正在请求' : '允许访问' }}</span>
+    </section>
   </div>
 </template>
 <style lang="less" scoped>
@@ -59,10 +66,68 @@ const text = computed(() => {
   flex-direction: column;
   align-items: center;
   justify-content: center;
+  padding: 24px;
+  color: #64748b;
+  text-align: center;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(248, 250, 252, 0.9));
+  cursor: pointer;
+}
+
+.access-card {
+  width: min(360px, 86%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 28px 24px;
+  border: 1px solid rgba(176, 31, 46, 0.14);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 20px 42px rgba(15, 23, 42, 0.08);
+}
+
+.access-eyebrow {
+  color: #b01f2e;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+h1 {
+  margin: 0;
+  color: #1f2937;
+  font-size: 20px;
+  font-weight: 700;
+}
+
+p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.7;
 }
 
 .icon-wrap {
-  width: 30px;
-  font-size: 40px;
+  width: 54px;
+  height: 54px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 16px;
+  color: #b01f2e;
+  background: rgba(176, 31, 46, 0.12);
+  font-size: 26px;
+}
+
+.access-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 38px;
+  padding: 0 18px;
+  margin-top: 4px;
+  border-radius: 999px;
+  color: #fff;
+  background: #b01f2e;
+  font-size: 14px;
+  font-weight: 650;
 }
 </style>

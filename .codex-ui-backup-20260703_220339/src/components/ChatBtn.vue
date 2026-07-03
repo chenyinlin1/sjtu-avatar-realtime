@@ -67,27 +67,22 @@ const emit = defineEmits([])
   min-height: 84px;
 
   .chat-btn {
-    height: 58px;
-    width: min(360px, calc(100vw - 64px));
+    height: 64px;
+    width: 296px;
     display: flex;
     justify-content: center;
     align-items: center;
     border-radius: 999px;
     opacity: 1;
-    background: #b01f2e;
-    box-shadow: 0 18px 34px rgba(176, 31, 46, 0.22);
+    background: linear-gradient(180deg, #7873f6 0%, #524de1 100%);
     transition: all 0.3s;
     z-index: 2;
     cursor: pointer;
-
-    &:hover {
-      background: #8f1825;
-    }
   }
 
   .start-chat {
     font-size: 16px;
-    font-weight: 650;
+    font-weight: 500;
     text-align: center;
     color: #ffffff;
   }
@@ -119,7 +114,7 @@ const emit = defineEmits([])
   }
 
   .stop-chat {
-    width: 58px;
+    width: 64px;
 
     .stop-chat-inner {
       width: 25px;

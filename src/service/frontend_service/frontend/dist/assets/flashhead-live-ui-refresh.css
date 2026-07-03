@@ -1,0 +1,293 @@
+/* flashhead-live-ui-refresh */
+:root {
+  --flashhead-red: #b01f2e;
+  --flashhead-red-dark: #8f1825;
+  --flashhead-red-soft: rgba(176, 31, 46, 0.12);
+  --flashhead-ink: #1f2937;
+  --flashhead-muted: #64748b;
+  --flashhead-line: #e5e7eb;
+  --flashhead-panel: rgba(255, 255, 255, 0.88);
+}
+
+html,
+body,
+#app {
+  min-height: 100%;
+  background: #f7f8fb;
+}
+
+.wrap,
+.wrap-electron {
+  color: var(--flashhead-ink);
+  background:
+    linear-gradient(135deg, rgba(248, 250, 252, 0.96) 0%, rgba(255, 255, 255, 0.98) 48%, rgba(248, 244, 245, 0.96) 100%) !important;
+  background-image:
+    linear-gradient(135deg, rgba(248, 250, 252, 0.96) 0%, rgba(255, 255, 255, 0.98) 48%, rgba(248, 244, 245, 0.96) 100%) !important;
+}
+
+.brand-badge {
+  width: clamp(180px, 17vw, 280px) !important;
+  min-height: 44px !important;
+  padding: 8px 14px !important;
+  border: 1px solid rgba(176, 31, 46, 0.16) !important;
+  border-radius: 8px !important;
+  background: rgba(255, 255, 255, 0.9) !important;
+  box-shadow: 0 14px 34px rgba(15, 23, 42, 0.08) !important;
+}
+
+.page-container {
+  padding: clamp(18px, 2.4vw, 32px) !important;
+}
+
+.video-container {
+  filter: drop-shadow(0 24px 48px rgba(15, 23, 42, 0.10)) !important;
+}
+
+.video-container .local-video-container,
+.video-container .remote-video-container {
+  border: 1px solid rgba(148, 163, 184, 0.22) !important;
+  border-radius: 28px !important;
+  background: #fff !important;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.72) !important;
+}
+
+.video-container .local-video-container.scaled {
+  border-radius: 18px !important;
+  box-shadow: 0 18px 36px rgba(15, 23, 42, 0.14) !important;
+}
+
+.actions {
+  bottom: 0 !important;
+}
+
+.action-group {
+  padding: 5px !important;
+  border: 1px solid rgba(148, 163, 184, 0.22) !important;
+  border-radius: 14px !important;
+  background: rgba(255, 255, 255, 0.86) !important;
+  box-shadow: 0 18px 36px rgba(15, 23, 42, 0.12) !important;
+  backdrop-filter: blur(14px) saturate(130%) !important;
+  -webkit-backdrop-filter: blur(14px) saturate(130%) !important;
+}
+
+.action-group .action,
+.avatar-clone-action,
+.voice-clone-action {
+  width: 40px !important;
+  height: 40px !important;
+  border-radius: 10px !important;
+  color: #475569 !important;
+}
+
+.action-group .action:hover,
+.avatar-clone-action:hover:not(.disabled),
+.voice-clone-action:not(.disabled):hover {
+  color: var(--flashhead-red) !important;
+  background: var(--flashhead-red-soft) !important;
+}
+
+.action-group .action .corner .corner-inner {
+  border-bottom-color: rgba(176, 31, 46, 0.72) !important;
+  border-right-color: rgba(176, 31, 46, 0.72) !important;
+}
+
+.action-group .action .selectors {
+  border: 1px solid rgba(148, 163, 184, 0.22) !important;
+  background: rgba(255, 255, 255, 0.96) !important;
+  box-shadow: 0 16px 32px rgba(15, 23, 42, 0.12) !important;
+}
+
+.action-group .action .selectors .selector {
+  color: #334155 !important;
+}
+
+.action-group .action .selectors .selector:hover {
+  color: var(--flashhead-red) !important;
+  background: var(--flashhead-red-soft) !important;
+}
+
+.action-group .interrupt-action.active {
+  color: #fff !important;
+  background: var(--flashhead-red) !important;
+}
+
+.player-controls {
+  min-height: 88px !important;
+}
+
+.player-controls .chat-btn {
+  width: min(360px, calc(100vw - 64px)) !important;
+  height: 58px !important;
+  border-radius: 999px !important;
+  background: var(--flashhead-red) !important;
+  box-shadow: 0 18px 34px rgba(176, 31, 46, 0.22) !important;
+}
+
+.player-controls .chat-btn:hover {
+  background: var(--flashhead-red-dark) !important;
+}
+
+.player-controls .start-chat,
+.player-controls .waiting-icon-text {
+  font-size: 16px !important;
+  font-weight: 650 !important;
+  color: #fff !important;
+}
+
+.player-controls .stop-chat {
+  width: 58px !important;
+}
+
+.chat-input-container {
+  width: min(760px, calc(100% - 140px)) !important;
+}
+
+.chat-input-container .chat-input-inner {
+  border: 1px solid rgba(176, 31, 46, 0.14) !important;
+  border-radius: 18px !important;
+  box-shadow: 0 18px 40px rgba(15, 23, 42, 0.09) !important;
+}
+
+.chat-input-container .chat-input-inner .send-btn,
+.chat-input-container .stop-chat-btn {
+  background: var(--flashhead-red) !important;
+}
+
+.chat-input-container .chat-input-inner .interrupt-btn {
+  background: #991b1b !important;
+}
+
+.answer-message-container.avatar {
+  background: var(--flashhead-red) !important;
+}
+
+.access-wrap {
+  gap: 12px !important;
+  padding: 24px !important;
+  color: var(--flashhead-muted) !important;
+  text-align: center !important;
+  font-size: 15px !important;
+  line-height: 1.7 !important;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(248, 250, 252, 0.9)) !important;
+}
+
+.access-wrap::before {
+  content: "FlashHead AI 助教";
+  display: block;
+  margin-bottom: 4px;
+  color: var(--flashhead-red);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.access-wrap::after {
+  content: "授权后进入实时对话";
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 38px;
+  padding: 0 18px;
+  margin-top: 6px;
+  border-radius: 999px;
+  color: #fff;
+  background: var(--flashhead-red);
+  font-weight: 650;
+}
+
+.icon-wrap {
+  width: 54px !important;
+  height: 54px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  border-radius: 16px !important;
+  color: var(--flashhead-red) !important;
+  background: var(--flashhead-red-soft) !important;
+  font-size: 26px !important;
+}
+
+.clone-dialog-panel,
+.voice-dialog-panel {
+  border: 1px solid rgba(148, 163, 184, 0.18) !important;
+  border-radius: 12px !important;
+  background: rgba(255, 255, 255, 0.98) !important;
+  color: var(--flashhead-ink) !important;
+}
+
+.voice-dialog-header {
+  border-bottom-color: var(--flashhead-line) !important;
+}
+
+.voice-subtitle,
+.clone-subtitle,
+.recording-state,
+.prompt-label {
+  color: var(--flashhead-muted) !important;
+}
+
+.prompt-panel,
+.recording-panel {
+  border-color: rgba(176, 31, 46, 0.14) !important;
+  background: #f8fafc !important;
+}
+
+.prompt-panel p,
+.recording-state strong {
+  color: var(--flashhead-ink) !important;
+}
+
+.source-tab.active,
+.primary-button {
+  background: var(--flashhead-red) !important;
+}
+
+@media (max-width: 720px) {
+  .brand-badge {
+    top: 10px !important;
+    left: 12px !important;
+    width: min(42vw, 180px) !important;
+    min-height: 36px !important;
+    padding: 6px 8px !important;
+  }
+
+  .page-container {
+    padding: 16px 14px 20px !important;
+    justify-content: flex-start !important;
+  }
+
+  .video-container {
+    height: 82% !important;
+    max-width: calc(100% - 78px) !important;
+    margin: 0 64px 0 0 !important;
+  }
+
+  .video-container .local-video-container,
+  .video-container .remote-video-container {
+    border-radius: 24px !important;
+  }
+
+  .actions {
+    left: calc(100% + 10px) !important;
+  }
+
+  .action-group {
+    padding: 4px !important;
+  }
+
+  .action-group .action,
+  .avatar-clone-action,
+  .voice-clone-action {
+    width: 38px !important;
+    height: 38px !important;
+  }
+
+  .player-controls .chat-btn {
+    width: min(360px, calc(100vw - 52px)) !important;
+    height: 56px !important;
+  }
+
+  .chat-input-container {
+    width: calc(100% - 32px) !important;
+  }
+}

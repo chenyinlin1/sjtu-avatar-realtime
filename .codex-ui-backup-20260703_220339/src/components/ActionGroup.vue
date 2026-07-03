@@ -191,26 +191,24 @@ function handleInterrupt(): void {
 
 <style lang="less" scoped>
 .action-group {
-  border: 1px solid rgba(148, 163, 184, 0.22);
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.86);
-  padding: 5px;
-  box-shadow: 0 18px 36px rgba(15, 23, 42, 0.12);
-  backdrop-filter: blur(14px) saturate(130%);
+  border-radius: 12px;
+  background: rgba(88, 87, 87, 0.5);
+  padding: 2px;
+  backdrop-filter: blur(8px);
   z-index: 200;
   position: relative;
 
   .action {
     cursor: pointer;
-    width: 40px;
-    height: 40px;
-    border-radius: 10px;
+    width: 42px;
+    height: 42px;
+    border-radius: 8px;
     font-size: 20px;
     display: flex;
     align-items: center;
     justify-content: center;
     position: relative;
-    color: #475569;
+    color: #fff;
 
     // 下拉展开时提升按钮层级，避免被其他元素遮挡
     &.menu-open {
@@ -228,8 +226,8 @@ function handleInterrupt(): void {
         height: 6px;
         border-top: 3px transparent solid;
         border-left: 3px transparent solid;
-        border-bottom: 3px rgba(176, 31, 46, 0.72) solid;
-        border-right: 3px rgba(176, 31, 46, 0.72) solid;
+        border-bottom: 3px #fff solid;
+        border-right: 3px #fff solid;
       }
     }
 
@@ -257,10 +255,8 @@ function handleInterrupt(): void {
       overflow: hidden;
       overflow: auto;
 
-      border: 1px solid rgba(148, 163, 184, 0.22);
-      background: rgba(255, 255, 255, 0.96);
-      box-shadow: 0 16px 32px rgba(15, 23, 42, 0.12);
-      backdrop-filter: blur(14px);
+      background: rgba(90, 90, 90, 0.5);
+      backdrop-filter: blur(8px);
 
       .selector {
         max-width: 250px;
@@ -271,12 +267,11 @@ function handleInterrupt(): void {
         cursor: pointer;
         height: 42px;
         line-height: 42px;
-        color: #334155;
+        color: #fff;
         font-size: 14px;
 
         &:hover {
-          color: #b01f2e;
-          background: rgba(176, 31, 46, 0.12);
+          background: #67666a;
         }
 
         padding-left: 15px;
@@ -297,8 +292,7 @@ function handleInterrupt(): void {
   }
 
   .action:hover {
-    color: #b01f2e;
-    background: rgba(176, 31, 46, 0.12);
+    background: #67666a;
   }
 
   .interrupt-action {
@@ -306,8 +300,7 @@ function handleInterrupt(): void {
 
     &.active {
       opacity: 1;
-      color: #fff;
-      background: #b01f2e;
+      background: rgba(232, 93, 93, 0.88);
     }
 
     &.disabled {
@@ -316,7 +309,7 @@ function handleInterrupt(): void {
   }
 
   .interrupt-action.active:hover {
-    background: #8f1825;
+    background: #e85d5d;
   }
 
   .interrupt-action.disabled:hover {

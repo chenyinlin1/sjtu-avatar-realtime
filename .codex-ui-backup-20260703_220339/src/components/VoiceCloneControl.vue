@@ -305,15 +305,15 @@ onBeforeUnmount(() => {
 <style lang="less" scoped>
 .voice-clone-action {
   cursor: pointer;
-  width: 40px;
-  height: 40px;
-  border-radius: 10px;
+  width: 42px;
+  height: 42px;
+  border-radius: 8px;
   font-size: 20px;
   display: flex;
   align-items: center;
   justify-content: center;
   position: relative;
-  color: #475569;
+  color: #fff;
 
   &.disabled {
     cursor: not-allowed;
@@ -321,8 +321,7 @@ onBeforeUnmount(() => {
   }
 
   &:not(.disabled):hover {
-    color: #b01f2e;
-    background: rgba(176, 31, 46, 0.12);
+    background: rgba(255, 255, 255, 0.14);
   }
 
   :global(.voice-spin .ant-spin-dot-item) {
@@ -347,9 +346,8 @@ onBeforeUnmount(() => {
   max-height: min(720px, calc(100vh - 32px));
   overflow: auto;
   border-radius: 8px;
-  border: 1px solid rgba(148, 163, 184, 0.18);
-  background: rgba(255, 255, 255, 0.98);
-  color: #1f2937;
+  background: #111827;
+  color: #f8fafc;
   box-shadow: 0 24px 80px rgba(0, 0, 0, 0.34);
 }
 
@@ -359,7 +357,7 @@ onBeforeUnmount(() => {
   justify-content: space-between;
   gap: 16px;
   padding: 18px 20px 14px;
-  border-bottom: 1px solid #e5e7eb;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.2);
 }
 
 .voice-title {
@@ -378,28 +376,28 @@ onBeforeUnmount(() => {
   height: 34px;
   border: 0;
   border-radius: 8px;
-  background: #f2f4f7;
-  color: #344054;
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
   cursor: pointer;
 }
 
 .prompt-panel {
   margin: 18px 20px 0;
   padding: 14px 16px;
-  border: 1px solid rgba(176, 31, 46, 0.14);
+  border: 1px solid rgba(96, 165, 250, 0.34);
   border-radius: 8px;
-  background: #f8fafc;
+  background: rgba(30, 64, 175, 0.22);
 
   p {
     margin: 8px 0 0;
-    color: #1f2937;
+    color: #e0f2fe;
     font-size: 16px;
     line-height: 1.8;
   }
 }
 
 .prompt-label {
-  color: #64748b;
+  color: #93c5fd;
   font-size: 13px;
   font-weight: 700;
 }
@@ -412,7 +410,7 @@ onBeforeUnmount(() => {
   margin: 18px 20px 0;
   padding: 16px;
   border-radius: 8px;
-  background: #f8fafc;
+  background: rgba(15, 23, 42, 0.92);
 }
 
 .record-orb {
@@ -422,8 +420,8 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(176, 31, 46, 0.12);
-  color: #b01f2e;
+  background: #334155;
+  color: #dbeafe;
   font-size: 26px;
 
   &.active {
@@ -441,11 +439,11 @@ onBeforeUnmount(() => {
   display: flex;
   justify-content: space-between;
   gap: 12px;
-  color: #64748b;
+  color: #cbd5e1;
   font-size: 14px;
 
   strong {
-    color: #1f2937;
+    color: #fff;
     font-variant-numeric: tabular-nums;
   }
 }
@@ -501,7 +499,7 @@ onBeforeUnmount(() => {
 }
 
 .primary-button {
-    background: #b01f2e;
+  background: #2563eb;
   color: #fff;
 
   &.stop {
@@ -510,8 +508,8 @@ onBeforeUnmount(() => {
 }
 
 .secondary-button {
-  background: #f2f4f7;
-  color: #344054;
+  background: rgba(255, 255, 255, 0.1);
+  color: #f8fafc;
 }
 
 @keyframes voice-bar {

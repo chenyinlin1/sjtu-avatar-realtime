@@ -282,15 +282,15 @@ async function uploadAvatarFile(file: File): Promise<void> {
 <style lang="less" scoped>
 .avatar-clone-action {
   cursor: pointer;
-  width: 40px;
-  height: 40px;
-  border-radius: 10px;
+  width: 42px;
+  height: 42px;
+  border-radius: 8px;
   font-size: 20px;
   display: flex;
   align-items: center;
   justify-content: center;
   position: relative;
-  color: #475569;
+  color: #fff;
 
   &.disabled {
     opacity: 0.55;
@@ -298,8 +298,7 @@ async function uploadAvatarFile(file: File): Promise<void> {
   }
 
   &:hover:not(.disabled) {
-    color: #b01f2e;
-    background: rgba(176, 31, 46, 0.12);
+    background: #67666a;
   }
 
   :global(.clone-spin .ant-spin-dot-item) {
@@ -386,7 +385,7 @@ async function uploadAvatarFile(file: File): Promise<void> {
 
   &.active {
     color: #fff;
-    background: #b01f2e;
+    background: #635bff;
   }
 }
 
