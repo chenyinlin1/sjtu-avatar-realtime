@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -22,6 +23,12 @@ from handlers.agent.tools.base_tool import BaseTool, ToolResult
 DEFAULT_NETEASE_NODEJS_BASE_URLS = [
     "https://163api.qijieya.cn",
     "https://wyy.xhily.com",
+    "http://45.152.64.114:3005",
+    "https://zm.armoe.cn",
+    "http://dg-t.cn:3000",
+    "http://111.229.38.178:3333",
+    "http://42.193.244.179:3000",
+    "https://music-api.focalors.ltd",
 ]
 
 
@@ -45,7 +52,7 @@ class SongCandidate:
 
 
 class MusicRequestTool(BaseTool):
-    """Search a song and return a playable text-link result."""
+    """Search a song and return a structured playable result."""
 
     def __init__(
         self,
@@ -79,7 +86,7 @@ class MusicRequestTool(BaseTool):
         return (
             "点歌工具。当用户说想听某首歌、点歌、播放音乐、找歌曲链接时使用。"
             "根据歌曲名或歌手关键词搜索音乐，并返回可播放链接、歌曲信息和候选列表。"
-            "当前默认使用网易云 NodeJS API 公共服务，发送方式为文本链接。"
+            "当前默认使用网易云 NodeJS API 公共服务，调用方负责把播放链接交给前端播放器。"
         )
 
     @property
@@ -113,7 +120,7 @@ class MusicRequestTool(BaseTool):
         }
 
     def execute(self, args: Dict[str, Any]) -> ToolResult:
-        song_name = str(args.get("song_name", "")).strip()
+        song_name = _normalize_query(str(args.get("song_name", "")).strip())
         if not song_name:
             return ToolResult(success=False, error="song_name is required")
 
@@ -131,7 +138,7 @@ class MusicRequestTool(BaseTool):
                 if not candidates:
                     errors.append(f"{base_url}: no results")
                     continue
-                selected = candidates[min(select_index - 1, len(candidates) - 1)]
+                selected = _select_best_candidate(song_name, candidates, select_index)
                 play_url = self._get_netease_play_url(base_url, selected.song_id)
                 return ToolResult(
                     success=True,
@@ -142,7 +149,7 @@ class MusicRequestTool(BaseTool):
                         "query": song_name,
                         "selected": selected.to_dict(),
                         "play_url": play_url,
-                        "send_mode": "text",
+                        "send_mode": "client_player",
                         "message": _build_message(selected, play_url),
                         "candidates": [c.to_dict() for c in candidates],
                     },
@@ -152,7 +159,8 @@ class MusicRequestTool(BaseTool):
 
         return ToolResult(
             success=False,
-            error="Music request failed; " + " | ".join(errors),
+            error="音乐源暂时不可用，请稍后再试。",
+            data={"details": errors},
         )
 
     def _search_netease(
@@ -178,7 +186,7 @@ class MusicRequestTool(BaseTool):
             payload = _get_json(base_url, path, params, timeout=self._timeout)
             items = payload.get("data") or []
             if items and items[0].get("url"):
-                return items[0]["url"]
+                return _prefer_https(items[0]["url"])
         return ""
 
 
@@ -202,14 +210,35 @@ def _get_json(
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             body = response.read().decode("utf-8", errors="replace")
+    except urllib.error.URLError as e:
+        if _is_ssl_certificate_error(e):
+            try:
+                context = ssl._create_unverified_context()
+                with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
+                    body = response.read().decode("utf-8", errors="replace")
+            except TimeoutError as retry_error:
+                raise RuntimeError("request timed out") from retry_error
+            except urllib.error.HTTPError as retry_error:
+                detail = retry_error.read().decode("utf-8", errors="replace")[:200]
+                raise RuntimeError(f"HTTP {retry_error.code}: {detail}") from retry_error
+            except urllib.error.URLError as retry_error:
+                raise RuntimeError(str(retry_error)) from retry_error
+        else:
+            raise RuntimeError(str(e)) from e
     except TimeoutError as e:
         raise RuntimeError("request timed out") from e
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", errors="replace")[:200]
         raise RuntimeError(f"HTTP {e.code}: {detail}") from e
-    except urllib.error.URLError as e:
-        raise RuntimeError(str(e)) from e
     return json.loads(body)
+
+
+def _is_ssl_certificate_error(error: urllib.error.URLError) -> bool:
+    reason = getattr(error, "reason", None)
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return True
+    message = str(error)
+    return "CERTIFICATE_VERIFY_FAILED" in message or "certificate verify failed" in message
 
 
 def _parse_song(song: Dict[str, Any]) -> SongCandidate:
@@ -224,11 +253,52 @@ def _parse_song(song: Dict[str, Any]) -> SongCandidate:
     )
 
 
+def _normalize_query(query: str) -> str:
+    query = query.replace("双节棍", "双截棍")
+    query = query.replace("週杰倫", "周杰伦").replace("周杰倫", "周杰伦")
+    if "的" in query and " " not in query:
+        query = query.replace("的", " ", 1)
+    return " ".join(query.split())
+
+
+def _select_best_candidate(query: str, candidates: List[SongCandidate], select_index: int) -> SongCandidate:
+    if select_index > 1:
+        return candidates[min(select_index - 1, len(candidates) - 1)]
+    terms = [term for term in query.replace("的", " ").split() if term]
+    if not terms:
+        return candidates[0]
+
+    def score(candidate: SongCandidate) -> int:
+        title = candidate.title.lower()
+        artist = " ".join(candidate.artists).lower()
+        text = f"{title} {artist}"
+        result = 0
+        for term in terms:
+            term_lower = term.lower()
+            if term_lower == title:
+                result += 8
+            elif term_lower in title:
+                result += 5
+            if term_lower in artist:
+                result += 4
+            if term_lower in text:
+                result += 1
+        return result
+
+    return max(candidates, key=score)
+
+
 def _build_message(song: SongCandidate, play_url: str) -> str:
     artist = " / ".join(song.artists) or "未知歌手"
     if play_url:
         return f"已为你找到《{song.title}》 - {artist}，播放链接：{play_url}"
     return f"已为你找到《{song.title}》 - {artist}，但暂时没有拿到可播放链接。"
+
+
+def _prefer_https(url: str) -> str:
+    if isinstance(url, str) and url.startswith("http://"):
+        return "https://" + url[len("http://"):]
+    return url
 
 
 def _coerce_int(value: Any, default: int) -> int:

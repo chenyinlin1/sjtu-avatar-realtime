@@ -93,6 +93,7 @@ class LLMContext(HandlerContext):
         self.bocha_endpoint = None
         self.web_search_timeout = 3.0
         self.web_search_result_limit = 5
+        self.music_player_active = False
 
 
 class HandlerLLM(HandlerBase, ABC):
@@ -108,8 +109,6 @@ class HandlerLLM(HandlerBase, ABC):
                            context: HandlerContext) -> HandlerDetail:
         definition = DataBundleDefinition()
         definition.add_entry(DataBundleEntry.create_text_entry("avatar_text"))
-        audio_definition = DataBundleDefinition()
-        audio_definition.add_entry(DataBundleEntry.create_audio_entry("avatar_audio", 1, 24000))
         inputs = {
             ChatDataType.HUMAN_TEXT: HandlerDataInfo(
                 type=ChatDataType.HUMAN_TEXT,
@@ -122,10 +121,6 @@ class HandlerLLM(HandlerBase, ABC):
             ChatDataType.AVATAR_TEXT: HandlerDataInfo(
                 type=ChatDataType.AVATAR_TEXT,
                 definition=definition,
-            ),
-            ChatDataType.AVATAR_AUDIO: HandlerDataInfo(
-                type=ChatDataType.AVATAR_AUDIO,
-                definition=audio_definition,
             ),
         }
         return HandlerDetail(
@@ -212,6 +207,22 @@ class HandlerLLM(HandlerBase, ABC):
             streamer.stream_data(end_output, name="openai_compatible", config=ChatStreamConfig(cancelable=True), finish_stream=True)
             return
         logger.info(f'llm input {context.model_name} {chat_text} ')
+        music_control = self._extract_music_control(chat_text)
+        if music_control:
+            logger.info(f"Music control detected: {music_control}")
+            self._handle_music_control(
+                context,
+                music_control,
+                output_definition,
+                streamer,
+                stream_key,
+                chat_text,
+            )
+            return
+        if context.music_player_active:
+            logger.info(f"Music player active, ignore non-control ASR text: {chat_text}")
+            self._finish_empty_response(context, output_definition, streamer, stream_key)
+            return
         music_query = self._extract_music_request(chat_text)
         if music_query:
             logger.info(f"Music request detected: {music_query}")
@@ -219,11 +230,9 @@ class HandlerLLM(HandlerBase, ABC):
                 context,
                 music_query,
                 output_definition,
-                output_definitions,
                 streamer,
                 stream_key,
                 chat_text,
-                inputs.stream_id,
             )
             return
         current_content = context.history.generate_next_messages(chat_text, 
@@ -385,21 +394,51 @@ class HandlerLLM(HandlerBase, ABC):
             ).strip(" ，。！？!?,;；：:\"'《》")
         return ""
 
+    @staticmethod
+    def _extract_music_control(text: str) -> Optional[dict]:
+        normalized = (text or "").strip()
+        if not normalized:
+            return None
+        compact = re.sub(r"\s+", "", normalized)
+        if any(
+            keyword in compact for keyword in ("停止音乐", "结束播放", "关闭音乐", "退出音乐", "别放了", "不听了")
+        ):
+            return {"action": "stop"}
+        if compact in {"暂停", "停"} or any(
+            keyword in compact for keyword in ("暂停音乐", "暂停播放", "先暂停", "暂停一下", "停一下")
+        ):
+            return {"action": "pause"}
+        if compact in {"继续", "恢复"} or any(
+            keyword in compact for keyword in ("继续播放", "继续音乐", "恢复播放", "接着放", "接着播放")
+        ):
+            return {"action": "resume"}
+        if compact in {"下一首", "下首"} or any(keyword in compact for keyword in ("下一首", "下首歌", "换一首", "切歌")):
+            return {"action": "next"}
+        if any(keyword in compact for keyword in ("音量小一点", "小声一点", "声音小一点", "降低音量", "调小音量")):
+            return {"action": "volume", "delta": -0.15}
+        if any(keyword in compact for keyword in ("音量大一点", "大声一点", "声音大一点", "提高音量", "调大音量")):
+            return {"action": "volume", "delta": 0.15}
+        if any(keyword in compact for keyword in ("静音", "关闭音乐声音")):
+            return {"action": "mute"}
+        if any(keyword in compact for keyword in ("取消静音", "打开音乐声音")):
+            return {"action": "unmute"}
+        return None
+
     def _handle_music_request(
         self,
         context: LLMContext,
         music_query: str,
         output_definition,
-        output_definitions: Dict[ChatDataType, HandlerDataInfo],
         streamer,
         stream_key: Optional[str],
         original_text: str,
-        source_stream_id,
     ):
         reply = ""
         play_url = ""
         song_title = music_query
         artist = ""
+        source = ""
+        candidates = []
         if MusicRequestTool is None:
             reply = "点歌工具暂时不可用，我还没有加载到音乐模块。"
         else:
@@ -410,6 +449,8 @@ class HandlerLLM(HandlerBase, ABC):
                     selected = result.data.get("selected") or {}
                     song_title = selected.get("title") or selected.get("name") or music_query
                     artist = selected.get("artist") or ""
+                    source = result.data.get("source") or ""
+                    candidates = result.data.get("candidates") or []
                     reply = f"正在播放《{song_title}》" + (f" - {artist}" if artist else "")
                 else:
                     reply = f"点歌失败：{result.error}"
@@ -419,23 +460,22 @@ class HandlerLLM(HandlerBase, ABC):
 
         if stream_key:
             context.active_stream_keys.add(stream_key)
-        streamed_audio = False
         if play_url:
-            try:
-                audio_definition = output_definitions.get(ChatDataType.AVATAR_AUDIO).definition
-                audio_streamer = context.data_submitter.get_streamer(ChatDataType.AVATAR_AUDIO)
-                audio_streamer.new_stream(
-                    sources=[source_stream_id] if source_stream_id else [],
-                    name="music_request",
-                    config=ChatStreamConfig(cancelable=True),
-                )
-                self._stream_music_audio(play_url, audio_definition, audio_streamer)
-                streamed_audio = True
-            except Exception as e:
-                logger.error(f"Music playback failed: {e}")
-                reply = f"已找到《{song_title}》，但播放失败：{e}"
-
-        if not streamed_audio:
+            context.music_player_active = True
+            output = DataBundle(output_definition)
+            output.set_main_data("")
+            output.add_meta("client_action", {
+                "type": "music.play",
+                "title": song_title,
+                "artist": artist,
+                "url": play_url,
+                "source": source,
+                "query": music_query,
+                "candidates": candidates,
+                "hints": ["暂停", "继续", "下一首", "音量小一点"],
+            })
+            streamer.stream_data(output)
+        else:
             output = DataBundle(output_definition)
             output.set_main_data(reply)
             streamer.stream_data(output)
@@ -449,61 +489,52 @@ class HandlerLLM(HandlerBase, ABC):
         end_output.set_main_data("")
         streamer.stream_data(end_output, finish_stream=True)
 
-    def _stream_music_audio(self, play_url: str, audio_definition, audio_streamer):
-        audio, sample_rate = self._download_music_audio(play_url)
-        target_sample_rate = 24000
-        if sample_rate != target_sample_rate:
-            import librosa
-            audio = librosa.resample(audio, orig_sr=sample_rate, target_sr=target_sample_rate)
-        audio = audio.astype("float32", copy=False)
-        max_seconds = _env_float("OPENAVATAR_MUSIC_MAX_SECONDS", 240.0)
-        if max_seconds > 0:
-            audio = audio[: int(target_sample_rate * max_seconds)]
-        if audio.size == 0:
-            raise RuntimeError("音乐音频为空")
+    def _handle_music_control(
+        self,
+        context: LLMContext,
+        control: dict,
+        output_definition,
+        streamer,
+        stream_key: Optional[str],
+        original_text: str,
+    ):
+        if stream_key:
+            context.active_stream_keys.add(stream_key)
+        action = control.get("action")
+        if action == "stop":
+            context.music_player_active = False
+        elif action in {"pause", "resume", "next", "volume", "mute", "unmute"}:
+            context.music_player_active = True
+        output = DataBundle(output_definition)
+        output.set_main_data("")
+        output.add_meta("client_action", {
+            "type": "music.control",
+            "action": action,
+            "delta": control.get("delta"),
+            "hints": ["暂停", "继续", "下一首", "音量小一点"],
+        })
+        streamer.stream_data(output)
+        context.history.add_message(HistoryMessage(role="human", content=original_text))
+        context.history.add_message(HistoryMessage(role="avatar", content=f"music.control:{action}"))
+        context.input_texts = ""
+        context.output_texts = ""
+        if stream_key:
+            context.active_stream_keys.discard(stream_key)
+        end_output = DataBundle(output_definition)
+        end_output.set_main_data("")
+        streamer.stream_data(end_output, finish_stream=True)
 
-        chunk_size = int(target_sample_rate * 0.5)
-        for offset in range(0, len(audio), chunk_size):
-            chunk = audio[offset: offset + chunk_size]
-            if chunk.size == 0:
-                continue
-            output = DataBundle(audio_definition)
-            output.set_main_data(chunk.reshape(1, -1))
-            audio_streamer.stream_data(output)
-
-        end_output = DataBundle(audio_definition)
-        end_output.set_main_data(__import__("numpy").zeros((1, 240), dtype="float32"))
-        audio_streamer.stream_data(end_output, finish_stream=True)
-
-    def _download_music_audio(self, play_url: str):
-        import io
-        import av
-        import numpy as np
-        import requests
-
-        headers = {"User-Agent": "OpenAvatarChat/1.0"}
-        response = requests.get(play_url, headers=headers, timeout=20)
-        response.raise_for_status()
-        container = av.open(io.BytesIO(response.content))
-        frames = []
-        sample_rate = None
-        for frame in container.decode(audio=0):
-            arr = frame.to_ndarray()
-            if arr.ndim == 2:
-                if arr.shape[0] <= arr.shape[1]:
-                    arr = arr.mean(axis=0)
-                else:
-                    arr = arr.mean(axis=1)
-            if np.issubdtype(arr.dtype, np.integer):
-                max_value = float(np.iinfo(arr.dtype).max)
-                arr = arr.astype(np.float32) / max_value
-            else:
-                arr = arr.astype(np.float32)
-            frames.append(arr)
-            sample_rate = frame.sample_rate
-        container.close()
-        if not frames or sample_rate is None:
-            raise RuntimeError("音乐解码失败")
-        audio = np.concatenate(frames)
-        audio = np.clip(audio, -1.0, 1.0)
-        return audio, sample_rate
+    def _finish_empty_response(
+        self,
+        context: LLMContext,
+        output_definition,
+        streamer,
+        stream_key: Optional[str],
+    ):
+        context.input_texts = ""
+        context.output_texts = ""
+        if stream_key:
+            context.active_stream_keys.discard(stream_key)
+        end_output = DataBundle(output_definition)
+        end_output.set_main_data("")
+        streamer.stream_data(end_output, finish_stream=True)
