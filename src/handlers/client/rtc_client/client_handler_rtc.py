@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import time
 from typing import Dict, Optional, cast, Union, Tuple
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -25,6 +26,11 @@ _selected_h264_encoder = 'libx264'
 _actual_h264_encoder = None
 _AVError = getattr(av, "AVError", av.error.FFmpegError)
 _AVCodecError = getattr(av.error, "FFmpegError", Exception)
+_AV_SYNC_DIAG = os.getenv("AV_SYNC_DIAG", "").lower() in {"1", "true", "yes", "on"}
+try:
+    _AV_SYNC_DIAG_EVERY = max(1, int(os.getenv("AV_SYNC_DIAG_EVERY", "1")))
+except ValueError:
+    _AV_SYNC_DIAG_EVERY = 1
 
 
 def _prioritize_h264():
@@ -73,6 +79,11 @@ def _configure_h264_hardware_encoding():
 
     def patched_encode_frame(self, frame, force_keyframe):
         global _selected_h264_encoder, _actual_h264_encoder
+        if _AV_SYNC_DIAG:
+            diag_seq = getattr(self, "_av_sync_encode_seq", 0) + 1
+            self._av_sync_encode_seq = diag_seq
+        else:
+            diag_seq = 0
         if self.codec and (
             frame.width != self.codec.width or frame.height != self.codec.height
             or abs(self.target_bitrate - self.codec.bit_rate) / self.codec.bit_rate > 0.1
@@ -114,6 +125,13 @@ def _configure_h264_hardware_encoding():
 
                     codec_created = True
                     logger.info(f"H.264 encoder created: {encoder_to_use}")
+                    if _AV_SYNC_DIAG:
+                        logger.info(
+                            f"AV_SYNC_H264_CODEC_CREATED encoder={encoder_to_use} "
+                            f"width={self.codec.width} height={self.codec.height} "
+                            f"codec_time_base={self.codec.time_base} codec_framerate={self.codec.framerate} "
+                            f"target_bitrate={self.target_bitrate}"
+                        )
 
                 except Exception as e:
                     logger.warning(f"Failed to create {encoder_to_use} encoder: {e}")
@@ -133,6 +151,13 @@ def _configure_h264_hardware_encoding():
                             encoder_to_use = "libx264"
                             codec_created = True
                             logger.info("H.264 encoder created: libx264 (fallback)")
+                            if _AV_SYNC_DIAG:
+                                logger.info(
+                                    f"AV_SYNC_H264_CODEC_CREATED encoder=libx264 fallback=True "
+                                    f"width={self.codec.width} height={self.codec.height} "
+                                    f"codec_time_base={self.codec.time_base} codec_framerate={self.codec.framerate} "
+                                    f"target_bitrate={self.target_bitrate}"
+                                )
 
                         except Exception as fallback_error:
                             logger.error(f"Failed to create fallback encoder: {fallback_error}")
@@ -176,7 +201,28 @@ def _configure_h264_hardware_encoding():
                 continue
 
         if data_to_send:
-            yield from self._split_bitstream(data_to_send)
+            if _AV_SYNC_DIAG:
+                payloads = list(self._split_bitstream(data_to_send))
+                if diag_seq % _AV_SYNC_DIAG_EVERY == 0:
+                    frame_pts = getattr(frame, "pts", None)
+                    frame_time_base = getattr(frame, "time_base", None)
+                    if frame_pts is not None and frame_time_base is not None:
+                        frame_ms = float(frame_pts * frame_time_base) * 1000
+                        rtp_ts = int(float(frame_pts * frame_time_base) * 90000)
+                    else:
+                        frame_ms = -1.0
+                        rtp_ts = -1
+                    logger.info(
+                        f"AV_SYNC_H264_ENCODE mono={time.monotonic():.6f} seq={diag_seq} "
+                        f"frame_pts={frame_pts} frame_time_base={frame_time_base} "
+                        f"frame_ms={frame_ms:.1f} rtp_ts_est={rtp_ts} "
+                        f"width={frame.width} height={frame.height} "
+                        f"bytes={len(data_to_send)} payloads={len(payloads)} "
+                        f"force_keyframe={force_keyframe} encoder={encoder_to_use}"
+                    )
+                yield from payloads
+            else:
+                yield from self._split_bitstream(data_to_send)
 
     original_get_encoder = aiortc_codecs.get_encoder
 

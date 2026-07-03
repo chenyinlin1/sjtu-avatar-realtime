@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import time
 import uuid
 import weakref
@@ -29,6 +30,14 @@ from handlers.client.ws_client.ws_message_protocol import (
     MessageType,
     serialize_message,
 )
+
+
+_AV_SYNC_DIAG = os.getenv("AV_SYNC_DIAG", "").lower() in {"1", "true", "yes", "on"}
+try:
+    _AV_SYNC_DIAG_EVERY = max(1, int(os.getenv("AV_SYNC_DIAG_EVERY", "1")))
+except ValueError:
+    _AV_SYNC_DIAG_EVERY = 1
+
 
 def _get_h264_encoder_info():
     """Get H.264 encoder info dynamically to avoid circular imports"""
@@ -78,6 +87,9 @@ class RtcStream(AsyncAudioVideoStreamHandler):
 
         self.streams: Dict[str, RtcStream] = {}
         self.owns_session = False
+        self._av_diag_audio_emit_seq = 0
+        self._av_diag_video_emit_seq = 0
+        self._av_diag_audio_samples_total = 0
 
 
     # copy is used as create_instance in fastrtc
@@ -133,6 +145,13 @@ class RtcStream(AsyncAudioVideoStreamHandler):
                 logger.warning(f"Session id conflict for {base_session_id}, fallback to {session_id}")
 
         self.session_id = session_id
+        if _AV_SYNC_DIAG:
+            logger.info(
+                f"AV_SYNC_RTC_START session={self.session_id} "
+                f"fps={self.fps} input_sr={self.input_sample_rate} "
+                f"output_sr={self.output_sample_rate} output_frame_size={self.output_frame_size} "
+                f"stream_start_delay={self.stream_start_delay}"
+            )
         existing_delegate = factory.client_handler_delegate.find_session_delegate(session_id)
         if existing_delegate is not None:
             self.client_session_delegate = existing_delegate
@@ -172,7 +191,9 @@ class RtcStream(AsyncAudioVideoStreamHandler):
                 self.first_audio_emitted = True
 
             while not self.quit.is_set():
+                get_data_start = time.perf_counter()
                 chat_data = await self.client_session_delegate.get_data(EngineChannelType.AUDIO)
+                get_data_wait_ms = (time.perf_counter() - get_data_start) * 1000
                 if chat_data is None or chat_data.data is None:
                     continue
                 audio_array = chat_data.data.get_main_data()
@@ -180,6 +201,19 @@ class RtcStream(AsyncAudioVideoStreamHandler):
                     continue
                 sample_num = audio_array.shape[-1]
                 self.emit_counter.add_property("audio_emit", sample_num / self.output_sample_rate)
+                self._av_diag_audio_emit_seq += 1
+                self._av_diag_audio_samples_total += sample_num
+                if _AV_SYNC_DIAG and self._av_diag_audio_emit_seq % _AV_SYNC_DIAG_EVERY == 0:
+                    logger.info(
+                        f"AV_SYNC_RTC_AUDIO_EMIT session={self.session_id} "
+                        f"mono={time.monotonic():.6f} seq={self._av_diag_audio_emit_seq} "
+                        f"samples={sample_num} duration_ms={sample_num / self.output_sample_rate * 1000:.1f} "
+                        f"total_audio_ms={self._av_diag_audio_samples_total / self.output_sample_rate * 1000:.1f} "
+                        f"wait_ms={get_data_wait_ms:.1f} "
+                        f"chat_ts={chat_data.timestamp[0]}/{chat_data.timestamp[1]} "
+                        f"is_first={chat_data.is_first_data} is_last={chat_data.is_last_data} "
+                        f"stream_id={chat_data.stream_id}"
+                    )
                 return self.output_sample_rate, audio_array
         except Exception as e:
             logger.opt(exception=e).error("Error in emit: ")
@@ -215,6 +249,18 @@ class RtcStream(AsyncAudioVideoStreamHandler):
                 if frame_data is None:
                     continue
 
+                self._av_diag_video_emit_seq += 1
+                if _AV_SYNC_DIAG and self._av_diag_video_emit_seq % _AV_SYNC_DIAG_EVERY == 0:
+                    shape = getattr(frame_data, "shape", None)
+                    logger.info(
+                        f"AV_SYNC_RTC_VIDEO_EMIT session={self.session_id} "
+                        f"mono={time.monotonic():.6f} seq={self._av_diag_video_emit_seq} "
+                        f"total_video_ms={self._av_diag_video_emit_seq / self.fps * 1000:.1f} "
+                        f"wait_ms={get_data_wait_time * 1000:.1f} "
+                        f"chat_ts={video_frame_data.timestamp[0]}/{video_frame_data.timestamp[1]} "
+                        f"is_first={video_frame_data.is_first_data} is_last={video_frame_data.is_last_data} "
+                        f"shape={shape} stream_id={video_frame_data.stream_id}"
+                    )
                 return frame_data
         except Exception as e:
             logger.opt(exception=e).error("Error in video_emit")

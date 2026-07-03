@@ -8,6 +8,7 @@ Wraps the FlashHead pipeline and maintains per-session state including:
 - Audio-video synchronization via paired output queue
 - Interrupt support for duplex mode
 """
+import os
 import queue
 import threading
 import time
@@ -18,6 +19,13 @@ from typing import Callable, Optional
 import numpy as np
 import torch
 from loguru import logger
+
+
+_AV_SYNC_DIAG = os.getenv("AV_SYNC_DIAG", "").lower() in {"1", "true", "yes", "on"}
+try:
+    _AV_SYNC_DIAG_EVERY = max(1, int(os.getenv("AV_SYNC_DIAG_EVERY", "1")))
+except ValueError:
+    _AV_SYNC_DIAG_EVERY = 1
 
 
 @dataclass
@@ -35,6 +43,12 @@ class FrameQueueItem:
     audio_segment: Optional[np.ndarray]  # float32 at original SR, or None
     speech_id: Optional[str]
     end_of_speech: bool
+    video_seq: int = -1
+    chunk_seq: int = -1
+    frame_idx: int = -1
+    audio_start: int = 0
+    audio_end: int = 0
+    enqueue_mono: float = 0.0
 
 
 class FlashHeadProcessor:
@@ -114,6 +128,10 @@ class FlashHeadProcessor:
         self._stop_event = threading.Event()
         self._collector_thread: Optional[threading.Thread] = None
         self._idle_thread: Optional[threading.Thread] = None
+        self._av_diag_chunk_seq = 0
+        self._av_diag_enqueue_seq = 0
+        self._av_diag_collect_seq = 0
+        self._av_diag_audio_samples_out = 0
 
     def _make_idle_frame(self, pipeline) -> np.ndarray:
         """Convert pipeline's reference image tensor to BGR uint8 numpy array."""
@@ -157,6 +175,8 @@ class FlashHeadProcessor:
             was_speaking = self._speaking
             self._current_speech_id = speech_id
             self._speaking = True
+        pending_before = len(self._pending_audio)
+        pending_original_before = len(self._pending_original_audio)
 
         if not was_speaking:
             self._speech_start_pending = True
@@ -186,6 +206,17 @@ class FlashHeadProcessor:
             f"16k={len(audio_data_16k)}, pending={len(self._pending_audio)}, "
             f"need={self.audio_slice_samples}"
         )
+        if _AV_SYNC_DIAG:
+            logger.info(
+                f"AV_SYNC_FLASHHEAD_ADD_AUDIO mono={time.monotonic():.6f} "
+                f"speech_id={speech_id} end={end_of_speech} "
+                f"audio16k_samples={len(audio_data_16k)} original_samples={len(original_audio)} "
+                f"pending16k_before={pending_before} pending16k_after={len(self._pending_audio)} "
+                f"pending_original_before={pending_original_before} "
+                f"pending_original_after={len(self._pending_original_audio)} "
+                f"need16k={self.audio_slice_samples} queue_size={self._output_queue.qsize()} "
+                f"was_speaking={was_speaking}"
+            )
 
         # Process full slices
         while len(self._pending_audio) >= self.audio_slice_samples:
@@ -240,6 +271,15 @@ class FlashHeadProcessor:
     def _process_chunk(self, audio_chunk_16k: np.ndarray, original_audio: np.ndarray,
                        speech_id: str, end_of_speech: bool):
         """Run one inference chunk through the FlashHead pipeline and enqueue results."""
+        self._av_diag_chunk_seq += 1
+        chunk_seq = self._av_diag_chunk_seq
+        if _AV_SYNC_DIAG:
+            logger.info(
+                f"AV_SYNC_FLASHHEAD_CHUNK_START mono={time.monotonic():.6f} "
+                f"chunk_seq={chunk_seq} speech_id={speech_id} end={end_of_speech} "
+                f"audio16k_samples={len(audio_chunk_16k)} original_samples={len(original_audio)} "
+                f"queue_size={self._output_queue.qsize()}"
+            )
         lock_start = time.monotonic()
         self._inference_lock.acquire()
         lock_wait = time.monotonic() - lock_start
@@ -285,6 +325,13 @@ class FlashHeadProcessor:
                 f"FlashHead chunk inference done: {video_frames.shape[0]} frames in {dur_ms:.1f}ms "
                 f"({video_frames.shape[0] / (dur_ms / 1000):.1f} FPS)"
             )
+            if _AV_SYNC_DIAG:
+                logger.info(
+                    f"AV_SYNC_FLASHHEAD_CHUNK_DONE mono={time.monotonic():.6f} "
+                    f"chunk_seq={chunk_seq} speech_id={speech_id} "
+                    f"frames={video_frames.shape[0]} duration_ms={dur_ms:.1f} "
+                    f"lock_wait_ms={lock_wait * 1000:.1f}"
+                )
         finally:
             self._inference_lock.release()
 
@@ -292,6 +339,10 @@ class FlashHeadProcessor:
         frames_np = video_frames.cpu().numpy().astype(np.uint8)
         n_frames = frames_np.shape[0]
         spf = self._original_audio_per_frame  # samples per frame at original SR
+        first_video_seq = None
+        last_video_seq = None
+        enqueued_audio_samples = 0
+        empty_audio_segments = 0
 
         for i in range(n_frames):
             if self._interrupted:
@@ -307,15 +358,38 @@ class FlashHeadProcessor:
                 audio_seg = original_audio[audio_start:audio_end]
             else:
                 audio_seg = None
+            audio_samples = len(audio_seg) if audio_seg is not None else 0
+            enqueued_audio_samples += audio_samples
+            if audio_samples == 0:
+                empty_audio_segments += 1
 
             is_last = (i == n_frames - 1) and end_of_speech
+            self._av_diag_enqueue_seq += 1
+            video_seq = self._av_diag_enqueue_seq
+            if first_video_seq is None:
+                first_video_seq = video_seq
+            last_video_seq = video_seq
 
             self._output_queue.put(FrameQueueItem(
                 video_frame=frame_bgr,
                 audio_segment=audio_seg,
                 speech_id=speech_id,
                 end_of_speech=is_last,
+                video_seq=video_seq,
+                chunk_seq=chunk_seq,
+                frame_idx=i,
+                audio_start=audio_start,
+                audio_end=audio_end,
+                enqueue_mono=time.monotonic(),
             ))
+        if _AV_SYNC_DIAG:
+            logger.info(
+                f"AV_SYNC_FLASHHEAD_ENQUEUE_CHUNK mono={time.monotonic():.6f} "
+                f"chunk_seq={chunk_seq} speech_id={speech_id} end={end_of_speech} "
+                f"frames={n_frames} first_video_seq={first_video_seq} last_video_seq={last_video_seq} "
+                f"audio_samples={enqueued_audio_samples} expected_audio_samples={n_frames * spf} "
+                f"empty_audio_segments={empty_audio_segments} queue_size={self._output_queue.qsize()}"
+            )
 
     def _idle_inference_worker(self):
         """Background thread: generates idle animation frames with silent audio.
@@ -458,16 +532,58 @@ class FlashHeadProcessor:
                 continue
 
             if item is not None and item.video_frame is not None:
-                # Speaking frame
+                self._av_diag_collect_seq += 1
+                audio_segment = item.audio_segment
+                filled_silence = False
+                if audio_segment is None or len(audio_segment) == 0:
+                    audio_segment = np.zeros(self._original_audio_per_frame, dtype=np.float32)
+                    filled_silence = True
+                audio_samples = len(audio_segment)
+                self._av_diag_audio_samples_out += audio_samples
+                if _AV_SYNC_DIAG and self._av_diag_collect_seq % _AV_SYNC_DIAG_EVERY == 0:
+                    emit_mono = time.monotonic()
+                    item_age_ms = (
+                        (emit_mono - item.enqueue_mono) * 1000
+                        if item.enqueue_mono > 0 else -1.0
+                    )
+                    kind = "speech" if item.speech_id is not None else "idle_animation"
+                    logger.info(
+                        f"AV_SYNC_FLASHHEAD_COLLECTOR_EMIT mono={emit_mono:.6f} "
+                        f"kind={kind} collector_seq={self._av_diag_collect_seq} frame_id={frame_id} "
+                        f"video_seq={item.video_seq} chunk_seq={item.chunk_seq} frame_idx={item.frame_idx} "
+                        f"speech_id={item.speech_id} audio_samples={audio_samples} "
+                        f"audio_total_ms={self._av_diag_audio_samples_out / self._output_sr * 1000:.1f} "
+                        f"queue_size_after_get={self._output_queue.qsize()} item_age_ms={item_age_ms:.1f} "
+                        f"target_lag_ms={(emit_mono - target_time) * 1000:.1f} "
+                        f"filled_silence={filled_silence} end={item.end_of_speech}"
+                    )
+                # Queued video frames may be speech or generated idle animation;
+                # always pair them with audio so WebRTC audio/video PTS advance together.
                 if self.callbacks.on_video_frame:
                     self.callbacks.on_video_frame(item.video_frame)
-                if item.audio_segment is not None and len(item.audio_segment) > 0:
-                    if self.callbacks.on_audio_frame:
-                        self.callbacks.on_audio_frame(item.audio_segment)
+                if self.callbacks.on_audio_frame:
+                    self.callbacks.on_audio_frame(audio_segment)
                 if item.end_of_speech:
                     if self.callbacks.on_speech_end:
                         self.callbacks.on_speech_end(item.speech_id)
             else:
+                self._av_diag_collect_seq += 1
+                idle_audio_samples = self._original_audio_per_frame
+                self._av_diag_audio_samples_out += idle_audio_samples
+                if _AV_SYNC_DIAG and self._av_diag_collect_seq % _AV_SYNC_DIAG_EVERY == 0:
+                    emit_mono = time.monotonic()
+                    kind = "end_marker" if item is not None and item.end_of_speech else "idle"
+                    logger.info(
+                        f"AV_SYNC_FLASHHEAD_COLLECTOR_EMIT mono={emit_mono:.6f} "
+                        f"kind={kind} collector_seq={self._av_diag_collect_seq} frame_id={frame_id} "
+                        f"video_seq=-1 chunk_seq={getattr(item, 'chunk_seq', -1)} "
+                        f"frame_idx={getattr(item, 'frame_idx', -1)} speech_id={getattr(item, 'speech_id', None)} "
+                        f"audio_samples={idle_audio_samples} "
+                        f"audio_total_ms={self._av_diag_audio_samples_out / self._output_sr * 1000:.1f} "
+                        f"queue_size_after_get={self._output_queue.qsize()} "
+                        f"target_lag_ms={(emit_mono - target_time) * 1000:.1f} "
+                        f"end={getattr(item, 'end_of_speech', False)}"
+                    )
                 # Idle frame: emit video AND silent audio so the RTC
                 # audio/video PTS advance at the same rate.  Without
                 # this, video runs ahead because idle frames had no
@@ -525,6 +641,16 @@ class FlashHeadProcessor:
             f"mono={interrupt_start_mono:.6f} queue_size={pending_queue_size} "
             f"current_speech_id={self._current_speech_id} speaking={self._speaking}"
         )
+        if _AV_SYNC_DIAG:
+            logger.info(
+                f"AV_SYNC_FLASHHEAD_INTERRUPT_START mono={interrupt_start_mono:.6f} "
+                f"queue_size={pending_queue_size} current_speech_id={self._current_speech_id} "
+                f"speaking={self._speaking} pending16k={len(self._pending_audio)} "
+                f"pending_original={len(self._pending_original_audio)} "
+                f"enqueued_video_seq={self._av_diag_enqueue_seq} "
+                f"collector_seq={self._av_diag_collect_seq} "
+                f"audio_out_samples={self._av_diag_audio_samples_out}"
+            )
         with self._lock:
             self._interrupted = True
             self._speaking = False
@@ -555,6 +681,13 @@ class FlashHeadProcessor:
             f"mono={time.monotonic():.6f} drained_queue_items={drained} "
             f"duration_ms={(time.monotonic() - interrupt_start_mono) * 1000:.1f}"
         )
+        if _AV_SYNC_DIAG:
+            logger.info(
+                f"AV_SYNC_FLASHHEAD_INTERRUPT_DONE mono={time.monotonic():.6f} "
+                f"drained_queue_items={drained} duration_ms={(time.monotonic() - interrupt_start_mono) * 1000:.1f} "
+                f"collector_seq={self._av_diag_collect_seq} "
+                f"audio_out_samples={self._av_diag_audio_samples_out}"
+            )
 
     def reset_interrupt(self):
         """Allow new audio processing after an interrupt."""
