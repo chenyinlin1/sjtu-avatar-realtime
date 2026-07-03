@@ -1,0 +1,66 @@
+{
+  "bank_id": "esconv_seed_skill_bank",
+  "version": "bootstrap-1.0.0",
+  "derived_from": "bootstrap/esconv_seed/skill/SKILL.md",
+  "derived_at": "2026-06-29T16:30:49+00:00",
+  "derivation_strategy": "copy_shared_base_plus_hidden_need_specialization",
+  "skill_count": 8,
+  "skills": [
+    {
+      "skill_id": "deep_empathy",
+      "hidden_need": "deep_empathy",
+      "path": "deep_empathy/SKILL.md",
+      "version": "bootstrap-1.0.0",
+      "display_name": "deep empathy"
+    },
+    {
+      "skill_id": "analyze_other_motives",
+      "hidden_need": "analyze_other_motives",
+      "path": "analyze_other_motives/SKILL.md",
+      "version": "bootstrap-1.0.0",
+      "display_name": "analysis of another person's motives"
+    },
+    {
+      "skill_id": "action_plan",
+      "hidden_need": "action_plan",
+      "path": "action_plan/SKILL.md",
+      "version": "bootstrap-1.0.0",
+      "display_name": "a concrete action plan"
+    },
+    {
+      "skill_id": "validation",
+      "hidden_need": "validation",
+      "path": "validation/SKILL.md",
+      "version": "bootstrap-1.0.0",
+      "display_name": "validation and non-blaming support"
+    },
+    {
+      "skill_id": "self_reflection",
+      "hidden_need": "self_reflection",
+      "path": "self_reflection/SKILL.md",
+      "version": "bootstrap-1.0.0",
+      "display_name": "guided self-reflection"
+    },
+    {
+      "skill_id": "praise_specific_behavior",
+      "hidden_need": "praise_specific_behavior",
+      "path": "praise_specific_behavior/SKILL.md",
+      "version": "bootstrap-1.0.0",
+      "display_name": "specific praise for effort or behavior"
+    },
+    {
+      "skill_id": "vent_listening",
+      "hidden_need": "vent_listening",
+      "path": "vent_listening/SKILL.md",
+      "version": "bootstrap-1.0.0",
+      "display_name": "patient listening and venting space"
+    },
+    {
+      "skill_id": "balanced_analysis",
+      "hidden_need": "balanced_analysis",
+      "path": "balanced_analysis/SKILL.md",
+      "version": "bootstrap-1.0.0",
+      "display_name": "balanced analysis"
+    }
+  ]
+}

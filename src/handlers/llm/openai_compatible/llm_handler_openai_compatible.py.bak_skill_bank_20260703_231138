@@ -2,8 +2,7 @@
 
 import os
 import re
-from pathlib import Path
-from typing import Dict, List, Optional, Set, cast
+from typing import Dict, Optional, Set, cast
 from loguru import logger
 from urllib.parse import urlsplit
 from pydantic import BaseModel, Field
@@ -27,13 +26,6 @@ try:
     from handlers.agent.tools.music_request import MusicRequestTool
 except Exception:
     MusicRequestTool = None
-
-try:
-    from esc_skill_bank_agent_package.agent import infer_hidden_need, load_skill_bank
-except Exception as e:
-    infer_hidden_need = None
-    load_skill_bank = None
-    logger.warning(f"Emotional support skill bank unavailable: {e}")
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -83,8 +75,14 @@ class LLMConfig(HandlerBaseConfigModel, BaseModel):
     model_name: str = Field(default="qwen-plus")
     system_prompt: str = Field(default=(
         "你的名字叫做小伴，是四川省自贡市老年人的情感陪护聊天机器人。"
-        "你要像一个亲切、耐心、懂礼貌的晚辈一样陪老人聊天，关心他们的生活、心情和身体感受。但是不要具体的姓名和年龄，只需要称呼老人为“您”。"
+        "你要像一个亲切、耐心、懂礼貌的晚辈一样陪老人聊天，关心他们的生活、心情和身体感受。"
+        "你的语气要温暖、自然、接地气，可以少量使用四川话或自贡本地表达，比如“要得”“慢慢说”“莫着急”，"
+        "但不要说太多方言，保证老人容易听懂。"
         "每次回复尽量简短，用两三句话回答，适合数字人口播。"
+        "老人开心时，你要一起高兴；老人难过、孤独、想家或焦虑时，你要先安慰、共情，再温柔地引导他们继续表达。"
+        "不要冷冰冰地讲大道理，不要催促老人。"
+        "如果老人提到明显身体不舒服、摔倒、胸闷、用药、疾病或危险情况，"
+        "你要提醒他们尽快联系家人、社区工作人员或医生，不能替代专业医疗判断。"
         "不要说自己是AI或语言模型，你就是陪他们聊天的小伴。"
     ))
     api_key: str = Field(default=os.getenv("DASHSCOPE_API_KEY"), repr=False)
@@ -97,15 +95,6 @@ class LLMConfig(HandlerBaseConfigModel, BaseModel):
     bocha_endpoint: str = Field(default=os.getenv("BOCHA_ENDPOINT", "https://api.bochaai.com/v1/web-search"))
     web_search_timeout: float = Field(default=_env_float("OPENAVATAR_WEB_SEARCH_TIMEOUT", 3.0))
     web_search_result_limit: int = Field(default=_env_int("OPENAVATAR_WEB_SEARCH_RESULT_LIMIT", 5))
-    enable_emotional_support_skills: bool = Field(
-        default=_env_bool("OPENAVATAR_ENABLE_EMOTIONAL_SUPPORT_SKILLS", True)
-    )
-    emotional_support_skill_bank_dir: str = Field(
-        default=os.getenv("OPENAVATAR_EMOTIONAL_SUPPORT_SKILL_BANK_DIR", "esc_skill_bank_agent_package/skill_bank")
-    )
-    emotional_support_skill_prompt_max_chars: int = Field(
-        default=_env_int("OPENAVATAR_EMOTIONAL_SUPPORT_SKILL_PROMPT_MAX_CHARS", 4000)
-    )
 
 
 class LLMContext(HandlerContext):
@@ -130,9 +119,6 @@ class LLMContext(HandlerContext):
         self.bocha_endpoint = None
         self.web_search_timeout = 3.0
         self.web_search_result_limit = 5
-        self.emotional_support_skill_bank = None
-        self.enable_emotional_support_skills = False
-        self.emotional_support_skill_prompt_max_chars = 4000
         self.music_player_active = False
 
 
@@ -200,17 +186,7 @@ class HandlerLLM(HandlerBase, ABC):
             "OPENAVATAR_WEB_SEARCH_RESULT_LIMIT",
             handler_config.web_search_result_limit,
         )
-        context.enable_emotional_support_skills = _env_bool(
-            "OPENAVATAR_ENABLE_EMOTIONAL_SUPPORT_SKILLS",
-            handler_config.enable_emotional_support_skills,
-        )
-        context.emotional_support_skill_prompt_max_chars = _env_int(
-            "OPENAVATAR_EMOTIONAL_SUPPORT_SKILL_PROMPT_MAX_CHARS",
-            handler_config.emotional_support_skill_prompt_max_chars,
-        )
-        context.emotional_support_skill_bank = self._load_emotional_support_skill_bank(handler_config)
         logger.info(f"LLM web search mode: {context.web_search_mode}")
-        logger.info(f"LLM emotional support skill bank enabled: {bool(context.emotional_support_skill_bank)}")
         context.client =    OpenAI(  
             # 若没有配置环境变量，请用百炼API Key将下行替换为：api_key="sk-xxx",
             api_key=context.api_key,
@@ -292,18 +268,16 @@ class HandlerLLM(HandlerBase, ABC):
             context.active_stream_keys.add(stream_key)
         cancelled = False
         try:
-            messages = [context.system_prompt]
-            skill_context = self._build_emotional_support_skill_context(context, chat_text)
-            if skill_context:
-                messages.append(skill_context)
+            messages = [
+                context.system_prompt,
+            ] + current_content
             if context.web_search_mode == "bocha":
                 search_context = self._build_bocha_search_context(context, chat_text)
                 if search_context:
-                    messages.append({
+                    messages.insert(1, {
                         "role": "system",
                         "content": search_context,
                     })
-            messages.extend(current_content)
 
             create_kwargs = {}
             if context.web_search_mode == "dashscope":
@@ -378,71 +352,6 @@ class HandlerLLM(HandlerBase, ABC):
                 pass
             context.client = None
 
-    def _load_emotional_support_skill_bank(self, handler_config: LLMConfig):
-        if not handler_config.enable_emotional_support_skills:
-            return None
-        if load_skill_bank is None or infer_hidden_need is None:
-            logger.warning("Emotional support skill bank is enabled but package import failed.")
-            return None
-        bank_dir = os.getenv(
-            "OPENAVATAR_EMOTIONAL_SUPPORT_SKILL_BANK_DIR",
-            handler_config.emotional_support_skill_bank_dir,
-        )
-        path = Path(bank_dir)
-        if not path.is_absolute():
-            path = Path.cwd() / path
-        try:
-            return load_skill_bank(path)
-        except Exception as e:
-            logger.warning(f"Failed to load emotional support skill bank from {path}: {e}")
-            return None
-
-    def _build_emotional_support_skill_context(self, context: LLMContext, chat_text: str) -> Optional[dict]:
-        if not context.enable_emotional_support_skills or context.emotional_support_skill_bank is None:
-            return None
-        if infer_hidden_need is None:
-            return None
-        visible_history = self._build_visible_support_history(context, chat_text)
-        try:
-            inference = infer_hidden_need(visible_history)
-            entry = context.emotional_support_skill_bank.get_entry(inference.need)
-            skill_text = context.emotional_support_skill_bank.load_skill_text(inference.need)
-        except Exception as e:
-            logger.warning(f"Failed to build emotional support skill context: {e}")
-            return None
-        max_chars = max(500, int(context.emotional_support_skill_prompt_max_chars or 4000))
-        logger.info(
-            f"Emotional support skill selected: need={inference.need} "
-            f"confidence={inference.confidence} skill={entry.skill_id}"
-        )
-        return {
-            "role": "system",
-            "content": "\n".join([
-                "\u60c5\u611f\u652f\u6301\u5bf9\u8bdd\u7b56\u7565\u63d0\u793a\uff1a\u4ee5\u4e0b\u5185\u5bb9\u53ea\u7528\u4e8e\u6307\u5bfc\u672c\u8f6e\u56de\u590d\u65b9\u5f0f\uff0c\u4e0d\u8981\u5411\u7528\u6237\u63d0\u5230 skill\u3001hidden_need\u3001SAGE\u3001\u8bc4\u5206\u6216\u5185\u90e8\u63a8\u65ad\u3002",
-                "\u6700\u9ad8\u4f18\u5148\u7ea7\u4ecd\u7136\u662f\u5c0f\u4f34\u7684\u4eba\u8bbe\u3001\u7b80\u77ed\u53e3\u64ad\u98ce\u683c\u3001\u8001\u4eba\u5b89\u5168\u548c\u533b\u7597\u98ce\u9669\u63d0\u9192\u3002",
-                f"\u672c\u8f6e\u63a8\u65ad\u7684\u652f\u6301\u9700\u6c42\uff1a{inference.need}\uff08\u7f6e\u4fe1\u5ea6\uff1a{inference.confidence}\uff09\u3002",
-                f"\u9009\u4e2d\u6280\u80fd\uff1a{entry.skill_id}\u3002\u8bf7\u5438\u6536\u6280\u80fd\u539f\u5219\uff0c\u627f\u63a5\u7528\u6237\u6700\u65b0\u5177\u4f53\u5185\u5bb9\uff0c\u5148\u5171\u60c5\uff0c\u518d\u6e29\u67d4\u63a8\u8fdb\u4e00\u5c0f\u6b65\uff1b\u56de\u590d\u4fdd\u6301\u81ea\u7136\u3001\u53e3\u8bed\u5316\uff0c\u901a\u5e38\u4e24\u4e09\u53e5\u8bdd\u3002",
-                "",
-                "\u9009\u4e2d\u6280\u80fd\u6587\u672c\uff1a",
-                "```markdown",
-                skill_text[:max_chars],
-                "```",
-            ]),
-        }
-
-    @staticmethod
-    def _build_visible_support_history(context: LLMContext, chat_text: str) -> List[Dict[str, str]]:
-        turns: List[Dict[str, str]] = []
-        history = getattr(context.history, "message_history", []) or []
-        for message in history[-8:]:
-            role = "assistant" if getattr(message, "role", None) == "avatar" else "user"
-            content = str(getattr(message, "content", "") or "").strip()
-            if content:
-                turns.append({"role": role, "content": content})
-        if chat_text:
-            turns.append({"role": "user", "content": chat_text})
-        return turns
-
     def _build_bocha_search_context(self, context: LLMContext, query: str) -> str:
         if not self._should_search(context, query):
             return ""
@@ -487,26 +396,6 @@ class HandlerLLM(HandlerBase, ABC):
             "今天",
             "现在",
             "新闻",
-            "天气",
-            "天气预报",
-            "气温",
-            "温度",
-            "多少度",
-            "几度",
-            "冷不冷",
-            "热不热",
-            "会不会下雨",
-            "下雨",
-            "降雨",
-            "雨伞",
-            "刮风",
-            "风大",
-            "空气质量",
-            "空气污染",
-            "雾霾",
-            "紫外线",
-            "穿什么",
-            "适合出门",
         )
         return any(keyword in query for keyword in trigger_keywords)
 

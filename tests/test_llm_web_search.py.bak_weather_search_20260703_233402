@@ -39,22 +39,6 @@ def test_bocha_search_uses_natural_language_trigger_words():
     assert not handler._should_search(context, "你好，介绍一下你自己")
 
 
-def test_bocha_search_triggers_for_weather_queries():
-    context = LLMContext("test-session")
-    context.web_search_always = False
-    handler = HandlerLLM()
-
-    weather_queries = [
-        "今天自贡天气怎么样？",
-        "明天会不会下雨？",
-        "现在气温多少度？",
-        "空气质量好不好，适合出门吗？",
-        "今天穿什么衣服合适？",
-    ]
-    for query in weather_queries:
-        assert handler._should_search(context, query)
-
-
 def test_bocha_search_can_be_forced_for_every_request():
     context = LLMContext("test-session")
     context.web_search_always = True
