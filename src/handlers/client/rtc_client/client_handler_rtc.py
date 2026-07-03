@@ -2,7 +2,7 @@ import asyncio
 import json
 import os
 import time
-from typing import Dict, Optional, cast, Union, Tuple
+from typing import Any, Dict, Optional, cast, Union, Tuple
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -322,6 +322,7 @@ class RtcClientSessionDelegate(ClientSessionDelegate):
         self.data_submitter = None
         self.signal_emitter = None
         self.shared_states = None
+        self.device_info: Optional[Dict[str, Any]] = None
         self.output_queues = {
             EngineChannelType.AUDIO: asyncio.Queue(),
             EngineChannelType.VIDEO: asyncio.Queue(),

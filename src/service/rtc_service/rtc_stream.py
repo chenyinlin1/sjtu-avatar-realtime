@@ -4,7 +4,7 @@ import os
 import time
 import uuid
 import weakref
-from typing import Optional, Dict
+from typing import Any, Optional, Dict
 
 import numpy as np
 # noinspection PyPackageRequirements
@@ -293,6 +293,62 @@ class RtcStream(AsyncAudioVideoStreamHandler):
             self.fps,
         )
 
+    def _send_data_channel_json(self, name: str, request_id: str, payload: Dict[str, Any]):
+        if self.chat_channel is None:
+            return
+        response = {
+            "header": {
+                "name": name,
+                "request_id": request_id,
+            },
+            "payload": payload,
+        }
+        try:
+            self.chat_channel.send(json.dumps(response, ensure_ascii=False))
+        except Exception as e:
+            logger.opt(exception=e).warning(f"Failed to send {name} data channel message")
+
+    def _handle_device_info(self, payload: Dict[str, Any], request_id: str):
+        if self.client_session_delegate is None:
+            return
+        if not isinstance(payload, dict):
+            payload = {}
+
+        raw_device_sn = payload.get("device_sn")
+        device_sn = str(raw_device_sn).strip() if raw_device_sn is not None else ""
+        if not device_sn:
+            self._send_data_channel_json(
+                "Error",
+                request_id,
+                {
+                    "code": "INVALID_DEVICE_INFO",
+                    "message": "device_sn is required",
+                },
+            )
+            logger.warning(f"[{self.session_id}] DeviceInfo rejected: device_sn is required")
+            return
+
+        def optional_text(value):
+            if value is None:
+                return None
+            cleaned = str(value).strip()
+            return cleaned or None
+
+        device_info = {
+            "device_sn": device_sn,
+            "elder_id": optional_text(payload.get("elder_id")),
+            "persona_id": optional_text(payload.get("persona_id")),
+            "received_at": time.time(),
+        }
+        setattr(self.client_session_delegate, "device_info", device_info)
+        logger.info(
+            f"[{self.session_id}] DeviceInfo registered: "
+            f"device_sn={device_info['device_sn']}, "
+            f"elder_id={device_info['elder_id']}, "
+            f"persona_id={device_info['persona_id']}"
+        )
+        self._send_data_channel_json("DeviceInfoAck", request_id, {"ok": True})
+
     def set_channel(self, channel):
             super().set_channel(channel)
             self.chat_channel = channel
@@ -310,14 +366,25 @@ class RtcStream(AsyncAudioVideoStreamHandler):
                     logger.info(e)
                     message = {}
 
+                if not isinstance(message, dict):
+                    message = {}
+                header = message.get("header") if isinstance(message.get("header"), dict) else {}
+                payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
+                message_name = header.get("name")
+                request_id = header.get("request_id") or str(uuid.uuid4())
+
                 if self.client_session_delegate is None:
+                    return
+                if message_name == "DeviceInfo":
+                    logger.info(f'on_chat_datachannel: {message}')
+                    self._handle_device_info(payload, request_id)
                     return
                 timestamp = self.client_session_delegate.get_timestamp()
                 if timestamp[0] / timestamp[1] < self.stream_start_delay:
                     return
                 logger.info(f'on_chat_datachannel: {message}')
     
-                if message['header']['name'] == 'Interrupt':
+                if message_name == 'Interrupt':
                     self.client_session_delegate.emit_signal(
                         ChatSignal(
                             type=ChatSignalType.INTERRUPT,
@@ -325,7 +392,7 @@ class RtcStream(AsyncAudioVideoStreamHandler):
                             source_name="rtc",
                         )
                     )
-                elif message['header']['name'] == 'SendHumanText':
+                elif message_name == 'SendHumanText':
                     # self.client_session_delegate.emit_signal(
                     #     ChatSignal(
                     #         type=ChatSignalType.INTERRUPT,
