@@ -91,7 +91,15 @@ default:
         module: llm/openai_compatible/llm_handler_openai_compatible
         model_name: "qwen-plus"
         enable_video_input: False
-        history_length: 20
+        history_length: 8
+        enable_scopemem: True
+        scopemem_store_path: "runtime/scopemem/memories.jsonl"
+        scopemem_user_name: "User"
+        scopemem_assistant_name: "Assistant"
+        scopemem_top_k: 6
+        scopemem_memory_max_chars: 1600
+        scopemem_extract_batch_size: 8
+        scopemem_clear_on_start: True
         api_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
         web_search_mode: "bocha"  # off | dashscope | bocha，可由 start_realtime_human.sh 覆盖
         web_search_always: true

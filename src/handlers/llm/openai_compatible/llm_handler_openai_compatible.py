@@ -20,6 +20,7 @@ from chat_engine.data_models.chat_stream import StreamKey
 from chat_engine.contexts.session_context import SessionContext
 from chat_engine.data_models.runtime_data.data_bundle import DataBundle, DataBundleDefinition, DataBundleEntry
 from .chat_history_manager import ChatHistory, HistoryMessage
+from .scopemem_adapter import OpenAvatarScopeMemory
 from .search_engine import format_search_results, search_bocha
 from chat_engine.data_models.chat_stream_config import ChatStreamConfig
 
@@ -106,6 +107,14 @@ class LLMConfig(HandlerBaseConfigModel, BaseModel):
     emotional_support_skill_prompt_max_chars: int = Field(
         default=_env_int("OPENAVATAR_EMOTIONAL_SUPPORT_SKILL_PROMPT_MAX_CHARS", 4000)
     )
+    enable_scopemem: bool = Field(default=False)
+    scopemem_store_path: str = Field(default="runtime/scopemem/memories.jsonl")
+    scopemem_user_name: str = Field(default="User")
+    scopemem_assistant_name: str = Field(default="Assistant")
+    scopemem_top_k: int = Field(default=6)
+    scopemem_memory_max_chars: int = Field(default=1600)
+    scopemem_extract_batch_size: int = Field(default=8)
+    scopemem_clear_on_start: bool = Field(default=False)
 
 
 class LLMContext(HandlerContext):
@@ -122,6 +131,7 @@ class LLMContext(HandlerContext):
         self.output_texts = ""
         self.current_image = None
         self.history = None
+        self.scopemem = None
         self.enable_video_input = False
         self.active_stream_keys: Set[StreamKey] = set()
         self.web_search_mode = "off"
@@ -217,6 +227,23 @@ class HandlerLLM(HandlerBase, ABC):
             base_url=context.api_url,
             timeout=5.0,  # 30秒超时，避免 API 无响应时阻塞整个系统
         )
+        if handler_config.enable_scopemem:
+            project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../.."))
+            store_path = handler_config.scopemem_store_path
+            if not os.path.isabs(store_path):
+                store_path = os.path.join(project_root, store_path)
+            context.scopemem = OpenAvatarScopeMemory(
+                client=context.client,
+                model_name=context.model_name,
+                store_path=store_path,
+                user_name=handler_config.scopemem_user_name,
+                assistant_name=handler_config.scopemem_assistant_name,
+                top_k=handler_config.scopemem_top_k,
+                memory_max_chars=handler_config.scopemem_memory_max_chars,
+                extract_batch_size=handler_config.scopemem_extract_batch_size,
+                clear_on_start=handler_config.scopemem_clear_on_start,
+            )
+            logger.info(f"ScopeMem memory enabled with store: {store_path}")
         return context
     
     def start_context(self, session_context, handler_context):
@@ -292,7 +319,13 @@ class HandlerLLM(HandlerBase, ABC):
             context.active_stream_keys.add(stream_key)
         cancelled = False
         try:
-            messages = [context.system_prompt]
+            system_prompt = context.system_prompt
+            if context.scopemem is not None:
+                try:
+                    system_prompt = context.scopemem.build_system_prompt(context.system_prompt, chat_text)
+                except Exception as e:
+                    logger.warning(f"ScopeMem memory retrieval failed: {e}")
+            messages = [system_prompt]
             skill_context = self._build_emotional_support_skill_context(context, chat_text)
             if skill_context:
                 messages.append(skill_context)
@@ -337,6 +370,8 @@ class HandlerLLM(HandlerBase, ABC):
             if not cancelled:
                 context.history.add_message(HistoryMessage(role="human", content=chat_text))
                 context.history.add_message(HistoryMessage(role="avatar", content=context.output_texts))
+                if context.scopemem is not None:
+                    context.scopemem.remember_turn(chat_text, context.output_texts)
         except Exception as e:
             logger.error(e)
             if isinstance(e, APIStatusError):
@@ -371,6 +406,12 @@ class HandlerLLM(HandlerBase, ABC):
 
     def destroy_context(self, context: HandlerContext):
         context = cast(LLMContext, context)
+        if context.scopemem is not None:
+            try:
+                context.scopemem.close()
+            except Exception:
+                pass
+            context.scopemem = None
         if context.client is not None:
             try:
                 context.client.close()

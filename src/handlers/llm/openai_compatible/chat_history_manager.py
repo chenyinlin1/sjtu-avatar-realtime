@@ -27,15 +27,16 @@ def filter_text(text):
 
 class ChatHistory:
     def __init__(self, history_length):
-        self.max_history_length = history_length
+        self.max_history_messages = max(0, int(history_length or 0))
         self.message_history = []
 
     def add_message(self, message: HistoryMessage):
         history = self.message_history
         history.append(message)
-        # thread safe
-        while len(history) >= self.max_history_length:
+        while self.max_history_messages and len(history) > self.max_history_messages:
             history.pop(0)
+        if self.max_history_messages == 0:
+            history.clear()
 
     def generate_next_messages(self, chat_text, images):
         def history_to_message(history: HistoryMessage):
