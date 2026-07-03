@@ -14,6 +14,7 @@ from engine_utils.directory_info import DirectoryInfo
 from service.service_utils.logger_utils import config_loggers
 from service.service_utils.service_config_loader import load_configs
 from service.service_utils.ssl_helpers import create_ssl_context
+from service.v1_adapter import register_v1_adapter
 
 project_dir = DirectoryInfo.get_project_dir()
 if project_dir not in sys.path:
@@ -87,6 +88,7 @@ def main():
     config_loggers(logger_config)
     
     demo_app, ui, parent_block = setup_demo()
+    register_v1_adapter(demo_app)
     
     chat_engine = ChatEngine()
     chat_engine.initialize(engine_config, app=demo_app, ui=ui, parent_block=parent_block)
