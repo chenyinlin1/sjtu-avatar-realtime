@@ -66,59 +66,89 @@ class TTSContext(HandlerContext):
     def _create_session(cls, input_stream: ChatStreamIdentity) -> BailianTTSSession:
         return BailianTTSSession(input_stream_id=input_stream)
 
+    @staticmethod
+    def _clean_text(text: Optional[str]) -> str:
+        if text is None:
+            return ""
+        return re.sub(r"<\|.*?\|>", "", text)
+
+    @staticmethod
+    def _has_client_action(data: ChatData) -> bool:
+        metadata = getattr(data.data, "metadata", None)
+        if not isinstance(metadata, dict):
+            return False
+        action = metadata.get("client_action")
+        return isinstance(action, dict) and bool(action.get("type"))
+
+    def _cancel_existing_sessions(self):
+        for old_key, old_session in list(self.api_links.items()):
+            logger.info(f"TTS: Cancelling previous session for stream {old_key}")
+            old_session.reset()
+        self.api_links.clear()
+
+    def _create_tts_session(self, input_stream: ChatStreamIdentity) -> BailianTTSSession:
+        self._cancel_existing_sessions()
+        session = self._create_session(input_stream)
+        self.api_links[input_stream.key] = session
+
+        streamer = self.data_submitter.get_streamer(ChatDataType.AVATAR_AUDIO)
+        output_stream_id = streamer.new_stream(
+            sources=[session.input_stream_id],
+            name="bailian_tts",
+            config=ChatStreamConfig(cancelable=True)
+        )
+        session.output_stream_key = output_stream_id.key
+        return session
+
+    def _ensure_synthesizer(self, session: BailianTTSSession, handler: 'HandlerTTS'):
+        if session.synthesizer is not None:
+            return
+        streamer = self.data_submitter.get_streamer(ChatDataType.AVATAR_AUDIO)
+        callback = CosyvoiceCallBack(
+            context=self,
+            output_definition=streamer.data_definition,
+            session=session)
+        synthesizer_kwargs = {
+            "model": handler.model_name,
+            "voice": handler.voice,
+            "callback": callback,
+            "format": AudioFormat.PCM_24000HZ_MONO_16BIT,
+        }
+        if handler.instruction:
+            synthesizer_kwargs["instruction"] = handler.instruction
+        session.synthesizer = SpeechSynthesizer(**synthesizer_kwargs)
+
     def handle_text_stream(self, data: ChatData, handler: 'HandlerTTS'):
         input_stream = data.stream_id
         input_stream_key = input_stream.key
+        text = self._clean_text(data.data.get_main_data())
+        text_end = data.is_last_data
+        has_text = bool(text.strip())
+
+        if not has_text and self._has_client_action(data):
+            logger.info("TTS: Skipping client_action-only avatar text")
+            self._cancel_existing_sessions()
+            return
 
         session = self.api_links.get(input_stream_key)
         if session is None:
-            # 新的输入流到达，取消所有旧 session（同一时间只有一个合成器活跃）
-            for old_key, old_session in list(self.api_links.items()):
-                logger.info(f"TTS: Cancelling previous session for stream {old_key}")
-                old_session.reset()
-            self.api_links.clear()
-
-            session = self._create_session(input_stream)
-            self.api_links[input_stream_key] = session
-
-            # 为新的输入流创建输出流，建立 1:1 的显式关联
-            streamer = self.data_submitter.get_streamer(ChatDataType.AVATAR_AUDIO)
-            output_stream_id = streamer.new_stream(
-                sources=[session.input_stream_id],
-                name="bailian_tts",
-                config=ChatStreamConfig(cancelable=True)
-            )
-            session.output_stream_key = output_stream_id.key
-
-        text = data.data.get_main_data()
-        if text is not None:
-            text = re.sub(r"<\|.*?\|>", "", text)
-
-        text_end = data.is_last_data
+            if not has_text:
+                logger.debug("TTS: Skipping empty avatar text without active session")
+                return
+            session = self._create_tts_session(input_stream)
 
         try:
-            if not text_end:
-                if session.synthesizer is None:
-                    streamer = self.data_submitter.get_streamer(ChatDataType.AVATAR_AUDIO)
-                    callback = CosyvoiceCallBack(
-                        context=self,
-                        output_definition=streamer.data_definition,
-                        session=session)
-                    synthesizer_kwargs = {
-                        "model": handler.model_name,
-                        "voice": handler.voice,
-                        "callback": callback,
-                        "format": AudioFormat.PCM_24000HZ_MONO_16BIT,
-                    }
-                    if handler.instruction:
-                        synthesizer_kwargs["instruction"] = handler.instruction
-                    session.synthesizer = SpeechSynthesizer(**synthesizer_kwargs)
+            if has_text:
+                self._ensure_synthesizer(session, handler)
                 logger.info(f'streaming_call {text}')
                 session.synthesizer.streaming_call(text)
-            else:
-                logger.info(f'streaming_call last {text}')
+            elif not text_end:
+                logger.debug("TTS: Skipping empty avatar text chunk")
+                return
+
+            if text_end:
+                logger.info(f'streaming_call complete {text}')
                 if session.synthesizer is not None:
-                    session.synthesizer.streaming_call(text)
                     session.synthesizer.streaming_complete()
                 session.synthesizer = None
                 self.api_links.pop(input_stream_key, None)
