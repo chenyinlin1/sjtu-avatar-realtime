@@ -19,7 +19,7 @@ from chat_engine.data_models.chat_engine_config_data import ChatEngineConfigMode
 from chat_engine.data_models.session_info_data import SessionInfoData
 
 
-OPEN_AVATAR_CHAT_VERSION = "0.6.0"
+OPEN_AVATAR_CHAT_VERSION = "0.6.1"
 
 
 @dataclass
