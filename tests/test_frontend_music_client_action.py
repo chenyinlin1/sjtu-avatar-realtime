@@ -16,6 +16,10 @@ def test_chat_store_consumes_music_client_actions():
     assert "new Audio" in source
     assert "playMusicAction" in source
     assert "controlMusicAction" in source
+    assert "[music] client action received" in source
+    assert "[music] play requested" in source
+    assert "[music] play failed" in source
+    assert "[music] audio error" in source
 
 
 def test_webrtc_data_channel_consumes_music_client_actions():
@@ -24,3 +28,4 @@ def test_webrtc_data_channel_consumes_music_client_actions():
     assert "handleClientAction" in source
     assert "consumedClientAction" in source
     assert "consumedClientAction && !payload.text" in source
+    assert "[music] WebRTC data channel consumed client_action" in source

@@ -4,6 +4,7 @@ import os
 import re
 from typing import Dict, Optional, Set, cast
 from loguru import logger
+from urllib.parse import urlsplit
 from pydantic import BaseModel, Field
 from abc import ABC
 from openai import APIStatusError, OpenAI
@@ -54,6 +55,20 @@ def _env_int(name: str, default: int) -> int:
     except ValueError:
         logger.warning(f"Invalid int env {name}={value}, use default {default}")
         return default
+
+
+def _summarize_url_for_log(url: str) -> str:
+    if not url:
+        return ""
+    try:
+        parts = urlsplit(url)
+    except Exception:
+        return "<invalid-url>"
+    path = parts.path or ""
+    if len(path) > 96:
+        path = "..." + path[-96:]
+    host = parts.netloc or "<no-host>"
+    return f"{parts.scheme}://{host}{path}"
 
 
 class LLMConfig(HandlerBaseConfigModel, BaseModel):
@@ -440,6 +455,7 @@ class HandlerLLM(HandlerBase, ABC):
         source = ""
         candidates = []
         if MusicRequestTool is None:
+            logger.warning(f"Music tool unavailable: query={music_query!r}")
             reply = "点歌工具暂时不可用，我还没有加载到音乐模块。"
         else:
             try:
@@ -452,10 +468,23 @@ class HandlerLLM(HandlerBase, ABC):
                     source = result.data.get("source") or ""
                     candidates = result.data.get("candidates") or []
                     reply = f"正在播放《{song_title}》" + (f" - {artist}" if artist else "")
+                    logger.info(
+                        f"Music tool result: success=True query={music_query!r} "
+                        f"source={source or '-'} title={song_title!r} artist={artist!r} "
+                        f"candidates={len(candidates)} play_url_present={bool(play_url)} "
+                        f"play_url={_summarize_url_for_log(play_url)}"
+                    )
                 else:
                     reply = f"点歌失败：{result.error}"
+                    details = (result.data or {}).get("details") if result.data else None
+                    logger.warning(
+                        f"Music tool result: success=False query={music_query!r} "
+                        f"error={result.error} details_count={len(details or [])}"
+                    )
+                    if details:
+                        logger.info(f"Music tool failure details sample: {details[:3]}")
             except Exception as e:
-                logger.error(f"Music request failed: {e}")
+                logger.exception(f"Music request failed: query={music_query!r} error={e}")
                 reply = f"点歌失败：{e}"
 
         if stream_key:
@@ -475,10 +504,18 @@ class HandlerLLM(HandlerBase, ABC):
                 "hints": ["暂停", "继续", "下一首", "音量小一点"],
             })
             streamer.stream_data(output)
+            logger.info(
+                f"Music client_action dispatch: type=music.play stream_key={stream_key} "
+                f"title={song_title!r} artist={artist!r} source={source or '-'} "
+                f"url={_summarize_url_for_log(play_url)}"
+            )
         else:
             output = DataBundle(output_definition)
             output.set_main_data(reply)
             streamer.stream_data(output)
+            logger.info(
+                f"Music request completed without playable URL: query={music_query!r} reply={reply!r}"
+            )
         context.history.add_message(HistoryMessage(role="human", content=original_text))
         context.history.add_message(HistoryMessage(role="avatar", content=reply))
         context.input_texts = ""
@@ -514,6 +551,10 @@ class HandlerLLM(HandlerBase, ABC):
             "hints": ["暂停", "继续", "下一首", "音量小一点"],
         })
         streamer.stream_data(output)
+        logger.info(
+            f"Music client_action dispatch: type=music.control stream_key={stream_key} "
+            f"action={action} delta={control.get('delta')} active={context.music_player_active}"
+        )
         context.history.add_message(HistoryMessage(role="human", content=original_text))
         context.history.add_message(HistoryMessage(role="avatar", content=f"music.control:{action}"))
         context.input_texts = ""

@@ -47,6 +47,35 @@ interface ChatState {
   musicMuted: boolean
 }
 
+function summarizeMusicUrl(url?: string): string {
+  if (!url) return ''
+  try {
+    const parsed = new URL(url)
+    return `${parsed.protocol}//${parsed.host}${parsed.pathname}`
+  } catch {
+    return '<invalid-url>'
+  }
+}
+
+function musicErrorInfo(error: unknown) {
+  if (error instanceof Error) {
+    return { name: error.name, message: error.message }
+  }
+  return { message: String(error) }
+}
+
+function musicAudioState(audio: HTMLAudioElement | null) {
+  if (!audio) return { hasAudio: false }
+  return {
+    hasAudio: true,
+    readyState: audio.readyState,
+    networkState: audio.networkState,
+    paused: audio.paused,
+    currentTime: Number.isFinite(audio.currentTime) ? audio.currentTime : null,
+    duration: Number.isFinite(audio.duration) ? audio.duration : null,
+  }
+}
+
 export const useChatStore = defineStore('chatStore', {
   state: (): ChatState => ({
     volumeMuted: false,
@@ -91,6 +120,12 @@ export const useChatStore = defineStore('chatStore', {
     handleClientAction(payload?: TextPayloadWithClientAction): boolean {
       const action = this.getClientAction(payload)
       if (!action) return false
+      console.info('[music] client action received', {
+        type: action.type,
+        streamKey: payload?.stream_key,
+        endOfSpeech: payload?.end_of_speech,
+        hasText: Boolean(payload?.text),
+      })
       if (action.type === 'music.play') {
         this.playMusicAction(action)
         return true
@@ -104,10 +139,19 @@ export const useChatStore = defineStore('chatStore', {
 
     playMusicAction(action: Extract<MusicClientAction, { type: 'music.play' }>) {
       if (!action.url) {
-        console.warn('music.play action missing url', action)
+        console.warn('[music] play action missing url', action)
         return
       }
+      console.info('[music] play requested', {
+        title: action.title,
+        artist: action.artist,
+        source: action.source,
+        url: summarizeMusicUrl(action.url),
+        volume: this.musicVolume,
+        muted: this.musicMuted,
+      })
       if (this.musicAudio) {
+        console.info('[music] replacing existing audio', musicAudioState(this.musicAudio))
         this.musicAudio.pause()
         this.musicAudio.src = ''
       }
@@ -115,27 +159,58 @@ export const useChatStore = defineStore('chatStore', {
       audio.preload = 'auto'
       audio.volume = this.musicVolume
       audio.muted = this.musicMuted
+      const state = () => ({
+        ...musicAudioState(audio),
+        url: summarizeMusicUrl(action.url),
+        errorCode: audio.error?.code,
+        errorMessage: audio.error?.message,
+      })
+      audio.addEventListener('canplay', () => {
+        console.info('[music] audio canplay', state())
+      }, { once: true })
+      audio.addEventListener('playing', () => {
+        console.info('[music] audio playing', state())
+      })
+      audio.addEventListener('error', () => {
+        console.error('[music] audio error', state())
+      })
       audio.addEventListener('ended', () => {
+        console.info('[music] audio ended', state())
         if (this.musicAudio === audio) {
           this.musicAudio = null
         }
       })
       this.musicAudio = audio
-      audio.play().catch((e) => {
-        console.error('music.play failed', e)
-      })
+      audio
+        .play()
+        .then(() => {
+          console.info('[music] play promise resolved', state())
+        })
+        .catch((e) => {
+          console.error('[music] play failed', { ...musicErrorInfo(e), ...state() })
+        })
     },
 
     controlMusicAction(action: Extract<MusicClientAction, { type: 'music.control' }>) {
       const audio = this.musicAudio
+      console.info('[music] control requested', {
+        action: action.action,
+        delta: action.delta,
+        audio: musicAudioState(audio),
+      })
       switch (action.action) {
         case 'pause':
           audio?.pause()
           break
         case 'resume':
-          audio?.play().catch((e) => {
-            console.error('music.resume failed', e)
-          })
+          audio
+            ?.play()
+            .then(() => {
+              console.info('[music] resume promise resolved', musicAudioState(audio))
+            })
+            .catch((e) => {
+              console.error('[music] resume failed', { ...musicErrorInfo(e), ...musicAudioState(audio) })
+            })
           break
         case 'stop':
           if (audio) {

@@ -23,6 +23,10 @@ def test_served_frontend_dist_contains_music_client_action_handler():
     assert "client_action" in bundled_js
     assert "music.play" in bundled_js
     assert "new Audio" in bundled_js
+    assert "[music] client action received" in bundled_js
+    assert "[music] play requested" in bundled_js
+    assert "[music] audio error" in bundled_js
+    assert "[music] WebRTC data channel consumed client_action" in bundled_js
     assert re.search(
         r"initChatDataChannel\(\)\{.*?handleClientAction.*?updateChatRecords",
         bundled_js,

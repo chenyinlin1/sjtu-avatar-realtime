@@ -816,7 +816,20 @@ class ClientHandlerRtc(ClientHandlerBase):
                     metadata=stream_metadata,
                 ),
             )
-        return self._send_message_to_chat_channel(context.session_id, response)
+        else:
+            return False
+
+        sent = self._send_message_to_chat_channel(context.session_id, response)
+        client_action = None
+        if isinstance(stream_metadata, dict):
+            client_action = stream_metadata.get("client_action")
+        if isinstance(client_action, dict):
+            logger.info(
+                f"RTC chat channel client_action send: session={context.session_id} "
+                f"sent={sent} type={client_action.get('type')} data_type={inputs.type.value} "
+                f"stream_key={stream_key_str} text_len={len(text or '')} end={text_end}"
+            )
+        return sent
 
     def handle(self, context: HandlerContext, inputs: ChatData,
                output_definitions: Dict[ChatDataType, HandlerDataInfo]):

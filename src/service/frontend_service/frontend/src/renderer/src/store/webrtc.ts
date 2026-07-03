@@ -150,6 +150,14 @@ export const useVideoChatStore = defineStore('videoChatStore', {
           const consumedClientAction = chatStore.handleClientAction(
             payload as Parameters<typeof chatStore.handleClientAction>[0]
           )
+          if (consumedClientAction) {
+            console.info('[music] WebRTC data channel consumed client_action', {
+              headerName,
+              streamKey: payload.stream_key,
+              hasText: Boolean(payload.text),
+              endOfSpeech: payload.end_of_speech,
+            })
+          }
           if (typeof payload.text !== 'string') return
           if (consumedClientAction && !payload.text) return
           const role = headerName === WsProtocol.EchoAvatarText ? 'avatar' : 'human'
