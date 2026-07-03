@@ -27,6 +27,7 @@ WEB_SEARCH_MODE="${OPENAVATAR_WEB_SEARCH_MODE:-bocha}"
 WEB_SEARCH_ALWAYS="${OPENAVATAR_WEB_SEARCH_ALWAYS:-true}"
 WEB_SEARCH_TIMEOUT="${OPENAVATAR_WEB_SEARCH_TIMEOUT:-3.0}"
 WEB_SEARCH_RESULT_LIMIT="${OPENAVATAR_WEB_SEARCH_RESULT_LIMIT:-5}"
+EMOTIONAL_SUPPORT_SKILLS="${OPENAVATAR_ENABLE_EMOTIONAL_SUPPORT_SKILLS:-false}"
 
 usage() {
   cat <<'MSG'
@@ -52,10 +53,16 @@ Search options:
       Search request timeout. Default: 3.0.
   --web-search-result-limit N
       Max search results injected into the prompt. Default: 5.
+  --enable-emotional-support-skills
+      Enable ESC skill-bank emotional support context injection.
+  --disable-emotional-support-skills
+      Disable ESC skill-bank emotional support context injection.
 
 Default:
   Bocha web search is enabled for every user request unless overridden by
   OPENAVATAR_WEB_SEARCH_MODE / OPENAVATAR_WEB_SEARCH_ALWAYS or CLI options.
+  Emotional support skills are enabled unless overridden by
+  OPENAVATAR_ENABLE_EMOTIONAL_SUPPORT_SKILLS or CLI options.
 MSG
 }
 
@@ -93,6 +100,14 @@ while [[ $# -gt 0 ]]; do
       WEB_SEARCH_RESULT_LIMIT="${2:-}"
       shift 2
       ;;
+    --enable-emotional-support-skills)
+      EMOTIONAL_SUPPORT_SKILLS="true"
+      shift
+      ;;
+    --disable-emotional-support-skills)
+      EMOTIONAL_SUPPORT_SKILLS="false"
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -109,6 +124,14 @@ case "$WEB_SEARCH_MODE" in
   off|dashscope|bocha) ;;
   *)
     echo "ERROR: --web-search-mode must be one of: off, dashscope, bocha" >&2
+    exit 1
+    ;;
+esac
+
+case "$EMOTIONAL_SUPPORT_SKILLS" in
+  true|false|1|0|yes|no|on|off) ;;
+  *)
+    echo "ERROR: emotional support skills must be one of: true, false, 1, 0, yes, no, on, off" >&2
     exit 1
     ;;
 esac
@@ -193,6 +216,7 @@ export OPENAVATAR_WEB_SEARCH_MODE="$WEB_SEARCH_MODE"
 export OPENAVATAR_WEB_SEARCH_ALWAYS="$WEB_SEARCH_ALWAYS"
 export OPENAVATAR_WEB_SEARCH_TIMEOUT="$WEB_SEARCH_TIMEOUT"
 export OPENAVATAR_WEB_SEARCH_RESULT_LIMIT="$WEB_SEARCH_RESULT_LIMIT"
+export OPENAVATAR_ENABLE_EMOTIONAL_SUPPORT_SKILLS="$EMOTIONAL_SUPPORT_SKILLS"
 
 nohup setsid "$PYTHON_BIN" src/demo.py \
   --config "$CONFIG_FILE" \
@@ -215,6 +239,7 @@ echo "PID_FILE: $PID_FILE"
 echo "LOG: $LOG_FILE"
 echo "URL: $PUBLIC_URL"
 echo "WEB_SEARCH_MODE: $WEB_SEARCH_MODE"
+echo "EMOTIONAL_SUPPORT_SKILLS: $EMOTIONAL_SUPPORT_SKILLS"
 echo
 echo "Following log. Press Ctrl+C to stop tail only; the service keeps running."
 tail -f "$LOG_FILE"

@@ -19,6 +19,7 @@ from chat_engine.data_models.chat_stream import StreamKey
 from chat_engine.contexts.session_context import SessionContext
 from chat_engine.data_models.runtime_data.data_bundle import DataBundle, DataBundleDefinition, DataBundleEntry
 from .chat_history_manager import ChatHistory, HistoryMessage
+from .emotional_support_adapter import EmotionalSupportSkillAdapter
 from .scopemem_adapter import OpenAvatarScopeMemory
 from .search_engine import format_search_results, search_bocha
 from chat_engine.data_models.chat_stream_config import ChatStreamConfig
@@ -72,9 +73,18 @@ def _summarize_url_for_log(url: str) -> str:
     return f"{parts.scheme}://{host}{path}"
 
 
+XIAOBAN_SYSTEM_PROMPT = (
+    "你叫小伴，是四川省自贡市老年人的情感陪护聊天机器人。"
+    "你要像一个亲切、耐心、懂礼貌的晚辈一样陪老人聊天，关心他们的生活、心情和身体感受。不要涉及具体的称呼、性别、姓名。"
+    "你的语气要温暖、自然、接地气，可以少量使用四川话或自贡本地表达，比如“要得”“慢慢说”“莫着急”，"
+    "每次回复尽量简短，用两三句话回答，适合数字人口播。"
+    "不要说自己是AI或语言模型，你就是陪他们聊天的小伴。"
+)
+
+
 class LLMConfig(HandlerBaseConfigModel, BaseModel):
     model_name: str = Field(default="qwen-plus")
-    system_prompt: str = Field(default="请你扮演一个 AI 助手，用简短的对话来回答用户的问题，并在对话内容中加入合适的标点符号，不需要加入标点符号相关的内容")
+    system_prompt: str = Field(default=XIAOBAN_SYSTEM_PROMPT)
     api_key: str = Field(default=os.getenv("DASHSCOPE_API_KEY"), repr=False)
     api_url: str = Field(default=None)
     enable_video_input: bool = Field(default=False)
@@ -93,6 +103,18 @@ class LLMConfig(HandlerBaseConfigModel, BaseModel):
     scopemem_memory_max_chars: int = Field(default=1600)
     scopemem_extract_batch_size: int = Field(default=8)
     scopemem_clear_on_start: bool = Field(default=False)
+    enable_emotional_support_skills: bool = Field(
+        default=_env_bool("OPENAVATAR_ENABLE_EMOTIONAL_SUPPORT_SKILLS", False)
+    )
+    emotional_support_skill_bank_dir: str = Field(
+        default=os.getenv("OPENAVATAR_EMOTIONAL_SUPPORT_SKILL_BANK_DIR", "esc_skill_bank_agent_package/skill_bank")
+    )
+    emotional_support_max_chars: int = Field(
+        default=_env_int("OPENAVATAR_EMOTIONAL_SUPPORT_MAX_CHARS", 1800)
+    )
+    emotional_support_history_turns: int = Field(
+        default=_env_int("OPENAVATAR_EMOTIONAL_SUPPORT_HISTORY_TURNS", 4)
+    )
 
 
 class LLMContext(HandlerContext):
@@ -109,7 +131,6 @@ class LLMContext(HandlerContext):
         self.output_texts = ""
         self.current_image = None
         self.history = None
-        self.scopemem = None
         self.enable_video_input = False
         self.active_stream_keys: Set[StreamKey] = set()
         self.web_search_mode = "off"
@@ -118,6 +139,8 @@ class LLMContext(HandlerContext):
         self.bocha_endpoint = None
         self.web_search_timeout = 3.0
         self.web_search_result_limit = 5
+        self.scopemem = None
+        self.emotional_support = None
         self.music_player_active = False
 
 
@@ -168,7 +191,7 @@ class HandlerLLM(HandlerBase, ABC):
             handler_config = LLMConfig()
         context = LLMContext(session_context.session_info.session_id)
         context.model_name = handler_config.model_name
-        context.system_prompt = {'role': 'system', 'content': handler_config.system_prompt}
+        context.system_prompt = {'role': 'system', 'content': XIAOBAN_SYSTEM_PROMPT}
         context.api_key = handler_config.api_key
         context.api_url = handler_config.api_url
         context.enable_video_input = handler_config.enable_video_input
@@ -184,6 +207,24 @@ class HandlerLLM(HandlerBase, ABC):
         context.web_search_result_limit = _env_int(
             "OPENAVATAR_WEB_SEARCH_RESULT_LIMIT",
             handler_config.web_search_result_limit,
+        )
+        context.emotional_support = EmotionalSupportSkillAdapter(
+            enabled=_env_bool(
+                "OPENAVATAR_ENABLE_EMOTIONAL_SUPPORT_SKILLS",
+                handler_config.enable_emotional_support_skills,
+            ),
+            skill_bank_dir=os.getenv(
+                "OPENAVATAR_EMOTIONAL_SUPPORT_SKILL_BANK_DIR",
+                handler_config.emotional_support_skill_bank_dir,
+            ),
+            max_chars=_env_int(
+                "OPENAVATAR_EMOTIONAL_SUPPORT_MAX_CHARS",
+                handler_config.emotional_support_max_chars,
+            ),
+            history_turns=_env_int(
+                "OPENAVATAR_EMOTIONAL_SUPPORT_HISTORY_TURNS",
+                handler_config.emotional_support_history_turns,
+            ),
         )
         logger.info(f"LLM web search mode: {context.web_search_mode}")
         context.client =    OpenAI(  
@@ -284,20 +325,25 @@ class HandlerLLM(HandlerBase, ABC):
             context.active_stream_keys.add(stream_key)
         cancelled = False
         try:
-            system_prompt = context.system_prompt
-            if context.scopemem is not None:
-                try:
-                    system_prompt = context.scopemem.build_system_prompt(context.system_prompt, chat_text)
-                except Exception as e:
-                    logger.warning(f"ScopeMem memory retrieval failed: {e}")
             messages = [
-                system_prompt,
+                context.system_prompt,
             ] + current_content
+            if context.scopemem is not None:
+                memory_context = self._build_scopemem_context(context, chat_text)
+                if memory_context:
+                    messages.append(memory_context)
+            if context.emotional_support is not None:
+                support_context = context.emotional_support.build_context_message(
+                    history=context.history.message_history,
+                    current_user_text=chat_text,
+                )
+                if support_context:
+                    messages.append(support_context)
             if context.web_search_mode == "bocha":
                 search_context = self._build_bocha_search_context(context, chat_text)
                 if search_context:
-                    messages.insert(1, {
-                        "role": "system",
+                    messages.append({
+                        "role": "user",
                         "content": search_context,
                     })
 
@@ -381,6 +427,55 @@ class HandlerLLM(HandlerBase, ABC):
             except Exception:
                 pass
             context.client = None
+
+    def _build_scopemem_context(self, context: LLMContext, query: str) -> Optional[dict]:
+        if context.scopemem is None:
+            return None
+        try:
+            memories = context.scopemem.search(query)
+        except Exception as e:
+            logger.warning(f"ScopeMem memory retrieval failed: {e}")
+            return None
+        if not memories:
+            logger.info(f"ScopeMem used memories: count=0 query={query[:120]!r}")
+            return None
+        lines = []
+        used_chars = 0
+        used_items = []
+        max_chars = max(300, int(getattr(context.scopemem, "memory_max_chars", 1600) or 1600))
+        for index, item in enumerate(memories, start=1):
+            text = str(item.get("memory") or item.get("text") or "").strip()
+            if not text:
+                continue
+            line = f"{index}. {text}"
+            if used_chars + len(line) + 1 > max_chars:
+                break
+            lines.append(line)
+            used_items.append((index, item, text))
+            used_chars += len(line) + 1
+        if not lines:
+            logger.info(f"ScopeMem used memories: count=0 query={query[:120]!r}")
+            return None
+        details = []
+        for index, item, text in used_items:
+            score = item.get("score")
+            score_text = f" score={score:.4f}" if isinstance(score, (int, float)) else ""
+            details.append(f"#{index}{score_text} text={text[:120]!r}")
+        logger.info(
+            "ScopeMem used memories: "
+            f"count={len(used_items)} query={query[:120]!r} "
+            f"items={' | '.join(details)}"
+        )
+        return {
+            "role": "user",
+            "content": "\n".join([
+                "以下是从长期记忆中检索到的可能相关信息，只在和用户当前问题相关时参考。",
+                "必须服从最高优先级的小伴人设；不要提到长期记忆、ScopeMem、检索或内部系统。",
+                "",
+                "长期记忆：",
+                *lines,
+            ]),
+        }
 
     def _build_bocha_search_context(self, context: LLMContext, query: str) -> str:
         if not self._should_search(context, query):
