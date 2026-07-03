@@ -14,7 +14,7 @@ from chat_engine.common.handler_base import HandlerBase, HandlerBaseInfo, Handle
 from chat_engine.data_models.chat_data.chat_data_model import ChatData
 from chat_engine.data_models.chat_data_type import ChatDataType
 from chat_engine.data_models.chat_signal import ChatSignal, SignalFilterRule
-from chat_engine.data_models.chat_signal_type import ChatSignalType
+from chat_engine.data_models.chat_signal_type import ChatSignalSourceType, ChatSignalType
 from chat_engine.data_models.chat_stream import StreamKey
 from chat_engine.contexts.session_context import SessionContext
 from chat_engine.data_models.runtime_data.data_bundle import DataBundle, DataBundleDefinition, DataBundleEntry
@@ -555,6 +555,19 @@ class HandlerLLM(HandlerBase, ABC):
             f"Music client_action dispatch: type=music.control stream_key={stream_key} "
             f"action={action} delta={control.get('delta')} active={context.music_player_active}"
         )
+        if action == "stop":
+            context.emit_signal(
+                ChatSignal(
+                    type=ChatSignalType.INTERRUPT,
+                    source_type=ChatSignalSourceType.HANDLER,
+                    source_name=context.owner or "LLMOpenAICompatible",
+                    signal_data={
+                        "reason": "music_stop",
+                        "trigger_text": original_text[:100],
+                    },
+                )
+            )
+            logger.info("Music stop emitted interrupt to clear pending avatar response streams")
         context.history.add_message(HistoryMessage(role="human", content=original_text))
         context.history.add_message(HistoryMessage(role="avatar", content=f"music.control:{action}"))
         context.input_texts = ""
