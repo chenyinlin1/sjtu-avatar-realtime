@@ -11,7 +11,7 @@ LOG_DIR="$PROJECT_DIR/logs"
 PID_FILE="$LOG_DIR/openavatarchat_${PORT}.pid"
 case "$PORT" in
   6006)
-    DEFAULT_PUBLIC_URL="https://u848390-ab99-ddff46b2.cqa1.seetacloud.com:8443"
+    DEFAULT_PUBLIC_URL="https://u848390-a11e-6f8e472d.cqa1.seetacloud.com:8443"
     ;;
   6008)
     DEFAULT_PUBLIC_URL="https://uu848390-a11e-6f8e472d.cqa1.seetacloud.com:8443"
