@@ -51,6 +51,9 @@ default:
         enabled: True
         module: asr/sensevoice/asr_handler_sensevoice
         model_name: "iic/SenseVoiceSmall"
+        language: "zh"
+        use_itn: true
+        drop_avatar_speaking_audio: true
         input_type_override:
           HUMAN_AUDIO: HUMAN_DUPLEX_AUDIO
         output_type_override:
@@ -92,6 +95,12 @@ default:
         model_name: "qwen-plus"
         enable_video_input: False
         history_length: 20
+        enable_scopemem: True
+        scopemem_store_path: "runtime/scopemem/memories.jsonl"
+        scopemem_user_name: "User"
+        scopemem_assistant_name: "Assistant"
+        scopemem_top_k: 6
+        scopemem_memory_max_chars: 1600
         system_prompt: "请你扮演一个 AI 助手，用简短的两三句对话来回答用户的问题，并在对话内容中加入合适的标点符号，不需要讨论标点符号相关的内容"
         api_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
         # api_key: "" # default=os.getenv("DASHSCOPE_API_KEY")

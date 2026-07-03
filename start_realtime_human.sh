@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-PROJECT_DIR="/root/autodl-tmp/chatrobot_rebuild_workspace/OpenAvatarChat"
+PROJECT_DIR="/root/autodl-tmp/realtime_digital_human_framework/OpenAvatarChat"
 PYTHON_BIN="/root/autodl-tmp/miniconda3/envs/openavatarchat/bin/python"
 CONFIG_FILE="config/chat_with_openai_compatible_bailian_cosyvoice_flashhead_6006.yaml"
 PORT="${PORT:-6006}"
@@ -9,10 +9,10 @@ LOG_DIR="$PROJECT_DIR/logs"
 PID_FILE="$LOG_DIR/openavatarchat_${PORT}.pid"
 case "$PORT" in
   6006)
-    DEFAULT_PUBLIC_URL="https://u848390-a11e-6f8e472d.cqa1.seetacloud.com:8443"
+    DEFAULT_PUBLIC_URL="https://u848390-b58e-3d622056.cqa1.seetacloud.com:8443"
     ;;
   6008)
-    DEFAULT_PUBLIC_URL="https://uu848390-a11e-6f8e472d.cqa1.seetacloud.com:8443"
+    DEFAULT_PUBLIC_URL="https://uu848390-b58e-3d622056.cqa1.seetacloud.com:8443"
     ;;
   *)
     DEFAULT_PUBLIC_URL=""
@@ -23,6 +23,7 @@ DEFAULT_DASHSCOPE_API_KEY="sk-2416366818d84babbd9cde7992d126cf"
 
 cd "$PROJECT_DIR"
 mkdir -p "$LOG_DIR"
+export PYTHONPATH="$PROJECT_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
 
 if [[ -z "${DASHSCOPE_API_KEY:-}" ]]; then
   export DASHSCOPE_API_KEY="$DEFAULT_DASHSCOPE_API_KEY"
