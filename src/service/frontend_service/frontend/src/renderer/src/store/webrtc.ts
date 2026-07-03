@@ -147,7 +147,11 @@ export const useVideoChatStore = defineStore('videoChatStore', {
         const headerName = data?.header?.name as WsProtocol | undefined
         if (headerName === WsProtocol.EchoHumanText || headerName === WsProtocol.EchoAvatarText) {
           const payload = (data.payload || {}) as TextPayload
+          const consumedClientAction = chatStore.handleClientAction(
+            payload as Parameters<typeof chatStore.handleClientAction>[0]
+          )
           if (typeof payload.text !== 'string') return
+          if (consumedClientAction && !payload.text) return
           const role = headerName === WsProtocol.EchoAvatarText ? 'avatar' : 'human'
           chatStore.updateChatRecords({ ...payload, role }, role)
         } else if (

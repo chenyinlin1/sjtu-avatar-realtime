@@ -23,3 +23,8 @@ def test_served_frontend_dist_contains_music_client_action_handler():
     assert "client_action" in bundled_js
     assert "music.play" in bundled_js
     assert "new Audio" in bundled_js
+    assert re.search(
+        r"initChatDataChannel\(\)\{.*?handleClientAction.*?updateChatRecords",
+        bundled_js,
+        re.DOTALL,
+    )
