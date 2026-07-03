@@ -283,6 +283,10 @@ class HandlerLLM(HandlerBase, ABC):
             end_output.set_main_data('')
             streamer.stream_data(end_output, name="openai_compatible", config=ChatStreamConfig(cancelable=True), finish_stream=True)
             return
+        if self._should_ignore_asr_fragment(chat_text):
+            logger.info(f"LLM ignored likely ASR fragment: {chat_text!r}")
+            self._finish_empty_response(context, output_definition, streamer, stream_key)
+            return
         logger.info(f'llm input {context.model_name} {chat_text} ')
         music_control = self._extract_music_control(chat_text)
         if music_control:
@@ -550,6 +554,33 @@ class HandlerLLM(HandlerBase, ABC):
             "适合出门",
         )
         return any(keyword in query for keyword in trigger_keywords)
+
+    @staticmethod
+    def _should_ignore_asr_fragment(text: str) -> bool:
+        normalized = re.sub(r"\s+", "", text or "")
+        normalized = normalized.strip(" ，。！？!?,;；：:\"'‘’“”《》()（）[]【】")
+        if not normalized:
+            return True
+        filler_words = {
+            "嗯", "啊", "呃", "哦", "噢", "诶", "哎", "呀", "嘛", "呢",
+            "是", "吗", "的", "了", "好", "对", "不", "没", "行", "间",
+            "嗯嗯", "啊啊", "哦哦", "是吗", "什么",
+        }
+        if normalized in filler_words:
+            return True
+        if re.fullmatch(r"[A-Za-z]+", normalized) and len(normalized) <= 4:
+            return True
+        if re.fullmatch(r"[\uac00-\ud7af]+", normalized) and len(normalized) <= 4:
+            return True
+        if len(normalized) <= 4:
+            intent_keywords = (
+                "什么", "啥", "咋", "怎么", "意思", "为什么", "多少", "哪里",
+                "哪个", "谁", "天气", "几点", "播放", "帮", "讲", "说", "告诉",
+            )
+            question_marks = ("?", "？")
+            if not normalized.endswith(question_marks) and not any(keyword in normalized for keyword in intent_keywords):
+                return True
+        return False
 
     @staticmethod
     def _extract_music_request(text: str) -> str:
