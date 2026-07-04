@@ -68,15 +68,15 @@ default:
         enabled: true
         module: llm/semantic_turn_detector/semantic_turn_detector_handler
         duplex_mode: true
-        api_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-        model_name: "qwen-plus"
+        api_url: "https://api.deepseek.com"
+        model_name: "deepseek-v4-flash"
         enable_interrupt_detection: true
         interrupt_on_any_speech: false
         min_text_length_for_interrupt: 2
         enable_completion_detection: false
         min_text_length_for_completion: 1
-        interrupt_judge_api_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-        interrupt_judge_model_name: "qwen-plus"
+        interrupt_judge_api_url: "https://api.deepseek.com"
+        interrupt_judge_model_name: "deepseek-v4-flash"
         request_timeout: 3.0
         max_context_turns: 3
       CosyVoice:
@@ -89,7 +89,7 @@ default:
       LLMOpenAICompatible:
         enabled: True
         module: llm/openai_compatible/llm_handler_openai_compatible
-        model_name: "qwen-plus"
+        model_name: "deepseek-v4-flash"
         enable_video_input: False
         history_length: 8
         enable_scopemem: True
@@ -100,7 +100,7 @@ default:
         scopemem_memory_max_chars: 1600
         scopemem_extract_batch_size: 8
         scopemem_clear_on_start: True
-        api_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        api_url: "https://api.deepseek.com"
         web_search_mode: "bocha"  # off | dashscope | bocha，可由 start_realtime_human.sh 覆盖
         web_search_always: true
         web_search_timeout: 3.0
@@ -110,7 +110,7 @@ default:
         emotional_support_max_chars: 1800
         emotional_support_history_turns: 4
         # bocha_api_key: "" # default=os.getenv("BOCHA_API_KEY")
-        # api_key: "" # default=os.getenv("DASHSCOPE_API_KEY")
+        # api_key: "" # default=os.getenv("DEEPSEEK_API_KEY")
       # === FlashHead 数字人 Avatar (Lite 模式) ===
       FlashHead:
         module: avatar/flashhead/avatar_handler_flashhead

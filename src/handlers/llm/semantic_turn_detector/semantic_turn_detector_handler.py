@@ -38,6 +38,9 @@ from chat_engine.data_models.runtime_data.data_bundle import DataBundle, DataBun
 from chat_engine.data_models.runtime_data.event_model import EventType
 
 
+DEEPSEEK_DISABLE_THINKING_EXTRA_BODY = {"thinking": {"type": "disabled"}}
+
+
 class SemanticTurnDetectorConfig(HandlerBaseConfigModel):
     """Configuration for Semantic Turn Detector"""
     # Feature switches
@@ -50,7 +53,7 @@ class SemanticTurnDetectorConfig(HandlerBaseConfigModel):
     # LLM configuration
     api_url: str = Field(default="", description="OpenAI-compatible API URL")
     api_key: str = Field(default="", description="API key")
-    model_name: str = Field(default="KE-SemanticVAD", description="Model name")
+    model_name: str = Field(default="deepseek-v4-flash", description="Model name")
     max_context_turns: int = Field(default=3, description="Maximum dialog turns to include in context")
     request_timeout: float = Field(default=3.0, description="LLM request timeout in seconds")
 
@@ -65,7 +68,7 @@ class SemanticTurnDetectorConfig(HandlerBaseConfigModel):
     # Interrupt intent judgment configuration
     interrupt_judge_api_url: str = Field(default="", description="LLM API URL for interrupt intent judgment")
     interrupt_judge_api_key: str = Field(default="", description="API key for interrupt intent judgment")
-    interrupt_judge_model_name: str = Field(default="Qwen3-8B", description="Model name for interrupt intent judgment")
+    interrupt_judge_model_name: str = Field(default="deepseek-v4-flash", description="Model name for interrupt intent judgment")
 
 
 class SemanticTurnDetectorContext(HandlerContext):
@@ -185,13 +188,9 @@ Your response:
         if not config:
             return
         if not config.api_key:
-            config.api_key = os.environ.get("SEMANTIC_LLM_EAS_TOKEN", "")
-        if not config.api_key:
-            config.api_key = os.environ.get("DASHSCOPE_API_KEY", "")
+            config.api_key = os.environ.get("DEEPSEEK_API_KEY", "")
         if not config.interrupt_judge_api_key:
-            config.interrupt_judge_api_key = os.environ.get("INTERRUPT_JUDGE_LLM_EAS_TOKEN", "")
-        if not config.interrupt_judge_api_key:
-            config.interrupt_judge_api_key = os.environ.get("DASHSCOPE_API_KEY", "")
+            config.interrupt_judge_api_key = os.environ.get("DEEPSEEK_API_KEY", "")
 
     def create_context(self, session_context: SessionContext,
                        handler_config: Optional[HandlerBaseConfigModel] = None) -> HandlerContext:
@@ -239,9 +238,7 @@ Your response:
         # Initialize interrupt intent judgment LLM client
         interrupt_judge_api_key = context.config.interrupt_judge_api_key
         if not interrupt_judge_api_key:
-            interrupt_judge_api_key = os.environ.get("INTERRUPT_JUDGE_LLM_EAS_TOKEN", "")
-        if not interrupt_judge_api_key:
-            interrupt_judge_api_key = os.environ.get("DASHSCOPE_API_KEY", "")
+            interrupt_judge_api_key = os.environ.get("DEEPSEEK_API_KEY", "")
 
         logger.info(
             f"SemanticTurnDetector: Initializing interrupt intent judgment LLM client, "
@@ -1066,7 +1063,8 @@ Your response:
                 model=context.config.model_name,
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=10,
-                temperature=0.1
+                temperature=0.1,
+                extra_body=DEEPSEEK_DISABLE_THINKING_EXTRA_BODY,
             )
             llm_done_mono = time.monotonic()
             # Log response details
@@ -1121,7 +1119,8 @@ Your response:
                 model=context.config.model_name,
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=10,
-                temperature=0.1
+                temperature=0.1,
+                extra_body=DEEPSEEK_DISABLE_THINKING_EXTRA_BODY,
             )
 
             result = response.choices[0].message.content.strip()
@@ -1301,8 +1300,7 @@ Your response:
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=15,
                 temperature=0.1,
-                # Disable thinking for Qwen3 - use chat_template_kwargs for vLLM/PAI-EAS
-                extra_body={"chat_template_kwargs": {"enable_thinking": False}}
+                extra_body=DEEPSEEK_DISABLE_THINKING_EXTRA_BODY,
             )
 
             intent_done_mono = time.monotonic()

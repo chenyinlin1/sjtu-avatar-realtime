@@ -12,7 +12,8 @@ PID_FILE="$LOG_DIR/openavatarchat_${PORT}.pid"
 # Do not inject stale cloud proxy defaults here. If OPENAVATARCHAT_PUBLIC_URL
 # is unset, the server derives public URLs from the current request Origin/Host.
 PUBLIC_URL="${OPENAVATARCHAT_PUBLIC_URL:-}"
-DEFAULT_DASHSCOPE_API_KEY="sk-2416366818d84babbd9cde7992d126cf"
+DEFAULT_DEEPSEEK_API_KEY="sk-2a14cba353814ca79e333693196c049b"
+DEFAULT_DASHSCOPE_API_KEY="sk-ws-H.RXYHLIP.Kh4Y.MEQCIACbJPegvfSq5y2Yi-Yy5qAdT37KoSv49wJXl-PUdcq6AiASAFj4NE7M4bf02RZq_dNwCt9ZK8gPkBBmIK3a-4JWMA"
 DEFAULT_BOCHA_API_KEY="sk-b897bbc697594d8da78633e94513d08a"  # 可填入 Bocha API Key；外部 BOCHA_API_KEY 环境变量优先
 WEB_SEARCH_MODE="${OPENAVATAR_WEB_SEARCH_MODE:-bocha}"
 WEB_SEARCH_ALWAYS="${OPENAVATAR_WEB_SEARCH_ALWAYS:-true}"
@@ -145,6 +146,10 @@ fi
 cd "$PROJECT_DIR"
 mkdir -p "$LOG_DIR"
 
+if [[ -z "${DEEPSEEK_API_KEY:-}" && -n "$DEFAULT_DEEPSEEK_API_KEY" ]]; then
+  export DEEPSEEK_API_KEY="$DEFAULT_DEEPSEEK_API_KEY"
+fi
+
 if [[ -z "${DASHSCOPE_API_KEY:-}" ]]; then
   export DASHSCOPE_API_KEY="$DEFAULT_DASHSCOPE_API_KEY"
 fi
@@ -164,6 +169,17 @@ fi
 # proxy values cause httpx/OpenAI requests to fail with "Connection error".
 unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
 
+if [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
+  cat >&2 <<'MSG'
+ERROR: DEEPSEEK_API_KEY is not set.
+
+Set it like this:
+  export DEEPSEEK_API_KEY='your DeepSeek API key'
+  ./start_realtime_human.sh
+MSG
+  exit 1
+fi
+
 if [[ -z "${DASHSCOPE_API_KEY:-}" ]]; then
   cat >&2 <<'MSG'
 ERROR: DASHSCOPE_API_KEY is not set, and DEFAULT_DASHSCOPE_API_KEY is empty.
@@ -179,16 +195,17 @@ if ! "$PYTHON_BIN" - <<'PY'
 import os
 import sys
 
-key = os.environ.get("DASHSCOPE_API_KEY", "")
-try:
-    key.encode("ascii")
-except UnicodeEncodeError:
-    print("ERROR: DASHSCOPE_API_KEY contains non-ASCII characters.", file=sys.stderr)
-    sys.exit(2)
+for name in ("DEEPSEEK_API_KEY", "DASHSCOPE_API_KEY"):
+    key = os.environ.get(name, "")
+    try:
+        key.encode("ascii")
+    except UnicodeEncodeError:
+        print(f"ERROR: {name} contains non-ASCII characters.", file=sys.stderr)
+        sys.exit(2)
 
-if not key.startswith("sk-"):
-    print("ERROR: DASHSCOPE_API_KEY looks invalid; it should start with sk-.", file=sys.stderr)
-    sys.exit(2)
+    if not key.startswith("sk-"):
+        print(f"ERROR: {name} looks invalid; it should start with sk-.", file=sys.stderr)
+        sys.exit(2)
 
 print("API key validation passed")
 PY
@@ -201,6 +218,7 @@ if [[ -x "$PROJECT_DIR/stop_realtime_human.sh" ]]; then
 fi
 
 LOG_FILE="$LOG_DIR/openavatarchat_${PORT}_$(date +%Y%m%d_%H%M%S).log"
+export DEEPSEEK_API_KEY
 export DASHSCOPE_API_KEY
 if [[ -n "$PUBLIC_URL" ]]; then
   export OPENAVATARCHAT_PUBLIC_URL="$PUBLIC_URL"

@@ -59,6 +59,9 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+DEEPSEEK_DISABLE_THINKING_EXTRA_BODY = {"thinking": {"type": "disabled"}}
+
+
 def _summarize_url_for_log(url: str) -> str:
     if not url:
         return ""
@@ -83,9 +86,9 @@ XIAOBAN_SYSTEM_PROMPT = (
 
 
 class LLMConfig(HandlerBaseConfigModel, BaseModel):
-    model_name: str = Field(default="qwen-plus")
+    model_name: str = Field(default="deepseek-v4-flash")
     system_prompt: str = Field(default=XIAOBAN_SYSTEM_PROMPT)
-    api_key: str = Field(default=os.getenv("DASHSCOPE_API_KEY"), repr=False)
+    api_key: str = Field(default=os.getenv("DEEPSEEK_API_KEY"), repr=False)
     api_url: str = Field(default=None)
     enable_video_input: bool = Field(default=False)
     history_length: int = Field(default=20)
@@ -182,8 +185,10 @@ class HandlerLLM(HandlerBase, ABC):
 
     def load(self, engine_config: ChatEngineConfigModel, handler_config: Optional[BaseModel] = None):
         if isinstance(handler_config, LLMConfig):
+            if not handler_config.api_key:
+                handler_config.api_key = os.getenv("DEEPSEEK_API_KEY")
             if handler_config.api_key is None or len(handler_config.api_key) == 0:
-                error_message = 'api_key is required in config/xxx.yaml, when use handler_llm'
+                error_message = 'DEEPSEEK_API_KEY or LLM api_key is required in config/xxx.yaml, when use handler_llm'
                 logger.error(error_message)
                 raise ValueError(error_message)
 
@@ -230,7 +235,7 @@ class HandlerLLM(HandlerBase, ABC):
         )
         logger.info(f"LLM web search mode: {context.web_search_mode}")
         context.client =    OpenAI(  
-            # 若没有配置环境变量，请用百炼API Key将下行替换为：api_key="sk-xxx",
+            # 若没有配置 DEEPSEEK_API_KEY，可在配置文件中显式传入 api_key。
             api_key=context.api_key,
             base_url=context.api_url,
             timeout=5.0,  # 30秒超时，避免 API 无响应时阻塞整个系统
@@ -349,12 +354,12 @@ class HandlerLLM(HandlerBase, ABC):
                         "content": search_context,
                     })
 
-            create_kwargs = {}
+            create_kwargs = {"extra_body": DEEPSEEK_DISABLE_THINKING_EXTRA_BODY}
             if context.web_search_mode == "dashscope":
-                create_kwargs["extra_body"] = {"enable_search": True}
+                logger.warning("DashScope native search is unavailable for DeepSeek; continuing without provider-native search")
 
             completion = context.client.chat.completions.create(
-                model=context.model_name,  # 此处以qwen-plus为例，可按需更换模型名称。模型列表：https://help.aliyun.com/zh/model-studio/getting-started/models
+                model=context.model_name,
                 messages=messages,
                 stream=True,
                 stream_options={"include_usage": True},

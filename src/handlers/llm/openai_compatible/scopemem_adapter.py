@@ -20,6 +20,9 @@ Use the durable memories only when they are relevant to the current user message
 Do not mention that you are using a memory system."""
 
 
+DEEPSEEK_DISABLE_THINKING_EXTRA_BODY = {"thinking": {"type": "disabled"}}
+
+
 def _normalize_text(text: Any) -> str:
     return re.sub(r"\s+", " ", str(text or "")).strip()
 
@@ -140,6 +143,7 @@ class OpenAvatarMemoryLLM:
                 messages=messages,
                 response_format={"type": "json_object"},
                 temperature=0,
+                extra_body=DEEPSEEK_DISABLE_THINKING_EXTRA_BODY,
             )
             self.call_counts[stage] = self.call_counts.get(stage, 0) + 1
             usage = getattr(response, "usage", None)

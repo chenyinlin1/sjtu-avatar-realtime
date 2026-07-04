@@ -46,5 +46,5 @@ def test_6006_config_keeps_transport_camera_and_llm_vision_choices():
     assert handlers["RtcClient"]["input_video_enabled"] is True
     assert handlers["RtcClient"]["output_video_fps"] == 25
     assert handlers["FlashHead"]["fps"] == 25
-    assert handlers["LLMOpenAICompatible"]["model_name"] == "qwen-plus"
+    assert handlers["LLMOpenAICompatible"]["model_name"] == "deepseek-v4-flash"
     assert handlers["LLMOpenAICompatible"]["enable_video_input"] is False
