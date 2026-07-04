@@ -3,8 +3,11 @@ from __future__ import annotations
 import math
 from typing import Any, Callable
 
+import numpy as np
+
 
 DEFAULT_SPEAKER_MODEL = "iic/speech_eres2netv2_sv_zh-cn_16k-common"
+ERES2NETV2_MODEL_MARKER = "speech_eres2netv2_sv_zh-cn_16k-common"
 
 
 class SpeakerVerifier:
@@ -14,16 +17,40 @@ class SpeakerVerifier:
         *,
         device: str = "cpu",
         model_factory: Callable[..., Any] | None = None,
+        pipeline_factory: Callable[..., Any] | None = None,
     ):
-        if model_factory is None:
-            from funasr import AutoModel
+        self.model_name = model_name
+        self.device = device
+        self.backend = (
+            "modelscope"
+            if _is_eres2netv2_model(model_name) and model_factory is None
+            else "funasr"
+        )
 
-            model_factory = AutoModel
+        if self.backend == "modelscope":
+            if pipeline_factory is None:
+                from modelscope.pipelines import pipeline
+                from modelscope.utils.constant import Tasks
 
-        self.model = model_factory(model=model_name, device=device, disable_update=True)
+                pipeline_factory = lambda **kwargs: pipeline(
+                    task=Tasks.speaker_verification, **kwargs
+                )
+            self.model = pipeline_factory(model=model_name, device=device)
+        else:
+            if model_factory is None:
+                from funasr import AutoModel
+
+                model_factory = AutoModel
+            self.model = model_factory(model=model_name, device=device, disable_update=True)
 
     def extract_embedding(self, pcm: bytes) -> tuple[float, ...]:
-        result = self.model.generate(input=pcm)
+        if self.backend == "modelscope":
+            samples = _pcm16_to_int16_array(pcm)
+            if samples.size == 0:
+                return ()
+            result = self.model([samples], output_emb=True)
+        else:
+            result = self.model.generate(input=pcm)
         return _extract_embedding(result)
 
 
@@ -42,6 +69,16 @@ def cosine_similarity(left: tuple[float, ...], right: tuple[float, ...]) -> floa
     )
 
 
+def _is_eres2netv2_model(model_name: str) -> bool:
+    return ERES2NETV2_MODEL_MARKER in model_name
+
+
+def _pcm16_to_int16_array(pcm: bytes) -> np.ndarray:
+    if not pcm:
+        return np.zeros(0, dtype=np.int16)
+    return np.frombuffer(pcm, dtype="<i2")
+
+
 def _extract_embedding(result: Any) -> tuple[float, ...]:
     if not result:
         return ()
@@ -52,7 +89,7 @@ def _extract_embedding(result: Any) -> tuple[float, ...]:
     if not isinstance(first, dict):
         return ()
 
-    for key in ("spk_embedding", "embedding", "emb", "vector"):
+    for key in ("spk_embedding", "embedding", "emb", "vector", "embs"):
         value = first.get(key)
         if value is not None:
             return tuple(float(item) for item in _flatten_embedding(value))
