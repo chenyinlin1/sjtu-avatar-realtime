@@ -735,7 +735,24 @@ class HandlerLLM(HandlerBase, ABC):
             return None
         compact = re.sub(r"\s+", "", normalized)
         if any(
-            keyword in compact for keyword in ("停止音乐", "结束播放", "关闭音乐", "退出音乐", "别放了", "不听了")
+            keyword in compact for keyword in (
+                "停止音乐",
+                "停止播放",
+                "停止放歌",
+                "停止这首歌",
+                "结束播放",
+                "结束音乐",
+                "关闭音乐",
+                "关掉音乐",
+                "关掉播放",
+                "退出音乐",
+                "别放了",
+                "别播了",
+                "别播放了",
+                "不要放了",
+                "不要播放了",
+                "不听了",
+            )
         ):
             return {"action": "stop"}
         if compact in {"暂停", "停"} or any(

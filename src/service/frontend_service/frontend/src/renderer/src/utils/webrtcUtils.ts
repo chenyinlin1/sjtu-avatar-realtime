@@ -10,6 +10,15 @@ export function createPeerConnection(
     play: () => Promise<any>
   }
 ) {
+  const remoteStream = new MediaStream()
+  const ensureRemotePlayback = (): void => {
+    if (!node) return
+    node.volume = 1.0
+    node.muted = false
+    node.autoplay = true
+    node.play().catch((e) => console.debug('Autoplay failed:', e))
+  }
+
   // register some listeners to help debugging
   pc.addEventListener(
     'icegatheringstatechange',
@@ -37,18 +46,19 @@ export function createPeerConnection(
 
   // connect audio / video from server to local
   pc.addEventListener('track', (evt) => {
-    console.debug('track event listener')
-    if (node && node.srcObject !== evt.streams[0]) {
-      console.debug('streams', evt.streams)
-      node.srcObject = evt.streams[0]
-      console.debug('node.srcOject', node.srcObject)
-      if (evt.track.kind === 'audio') {
-        node.volume = 1.0 // Ensure volume is up
-        node.muted = false
-        node.autoplay = true
-        // Attempt to play (needed for some browsers)
-        node.play().catch((e) => console.debug('Autoplay failed:', e))
-      }
+    console.debug('track event listener', evt.track.kind)
+    if (!node) return
+
+    if (!remoteStream.getTracks().some((track) => track.id === evt.track.id)) {
+      remoteStream.addTrack(evt.track)
+    }
+    if (node.srcObject !== remoteStream) {
+      node.srcObject = remoteStream
+      console.debug('node.srcObject', node.srcObject)
+    }
+    if (evt.track.kind === 'audio') {
+      evt.track.onunmute = ensureRemotePlayback
+      ensureRemotePlayback()
     }
   })
 
@@ -216,14 +226,32 @@ export async function setupWebRTC(
   peerConnection: RTCPeerConnection,
   remoteNode: HTMLVideoElement
 ) {
+  const remoteStream = new MediaStream()
+  const ensureRemotePlayback = (): void => {
+    if (!remoteNode) return
+    remoteNode.volume = 1.0
+    remoteNode.muted = false
+    remoteNode.autoplay = true
+    remoteNode.play().catch((e) => console.debug('Autoplay failed:', e))
+  }
+
   //  Send audio-video stream to server
   stream.getTracks().forEach(async (track) => {
-    const sender = peerConnection.addTrack(track, stream)
+    peerConnection.addTrack(track, stream)
   })
 
   peerConnection.addEventListener('track', (evt) => {
-    if (remoteNode && remoteNode.srcObject !== evt.streams[0]) {
-      remoteNode.srcObject = evt.streams[0]
+    if (!remoteNode) return
+
+    if (!remoteStream.getTracks().some((track) => track.id === evt.track.id)) {
+      remoteStream.addTrack(evt.track)
+    }
+    if (remoteNode.srcObject !== remoteStream) {
+      remoteNode.srcObject = remoteStream
+    }
+    if (evt.track.kind === 'audio') {
+      evt.track.onunmute = ensureRemotePlayback
+      ensureRemotePlayback()
     }
   })
 

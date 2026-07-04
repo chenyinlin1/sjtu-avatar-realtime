@@ -47,6 +47,15 @@ def test_bocha_search_can_be_forced_for_every_request():
     assert handler._should_search(context, "你好，介绍一下你自己")
 
 
+def test_music_control_stop_recognizes_natural_stop_phrases():
+    handler = HandlerLLM()
+
+    for text in ["停止播放", "停止音乐", "停止放歌", "结束音乐", "关掉播放", "别播了", "不要放了"]:
+        assert handler._extract_music_control(text) == {"action": "stop"}
+
+    assert handler._extract_music_control("暂停") == {"action": "pause"}
+
+
 class FakeHistory:
     def __init__(self):
         self.messages = []
