@@ -9,18 +9,9 @@ CONFIG_FILE="${CONFIG_FILE:-config/chat_with_openai_compatible_bailian_cosyvoice
 PORT="${PORT:-6006}"
 LOG_DIR="$PROJECT_DIR/logs"
 PID_FILE="$LOG_DIR/openavatarchat_${PORT}.pid"
-case "$PORT" in
-  6006)
-    DEFAULT_PUBLIC_URL="https://u848390-a11e-6f8e472d.cqa1.seetacloud.com:8443"
-    ;;
-  6008)
-    DEFAULT_PUBLIC_URL="https://uu848390-a11e-6f8e472d.cqa1.seetacloud.com:8443"
-    ;;
-  *)
-    DEFAULT_PUBLIC_URL=""
-    ;;
-esac
-PUBLIC_URL="${OPENAVATARCHAT_PUBLIC_URL:-$DEFAULT_PUBLIC_URL}"
+# Do not inject stale cloud proxy defaults here. If OPENAVATARCHAT_PUBLIC_URL
+# is unset, the server derives public URLs from the current request Origin/Host.
+PUBLIC_URL="${OPENAVATARCHAT_PUBLIC_URL:-}"
 DEFAULT_DASHSCOPE_API_KEY="sk-2416366818d84babbd9cde7992d126cf"
 DEFAULT_BOCHA_API_KEY="sk-b897bbc697594d8da78633e94513d08a"  # 可填入 Bocha API Key；外部 BOCHA_API_KEY 环境变量优先
 WEB_SEARCH_MODE="${OPENAVATAR_WEB_SEARCH_MODE:-bocha}"
@@ -211,7 +202,11 @@ fi
 
 LOG_FILE="$LOG_DIR/openavatarchat_${PORT}_$(date +%Y%m%d_%H%M%S).log"
 export DASHSCOPE_API_KEY
-export OPENAVATARCHAT_PUBLIC_URL="$PUBLIC_URL"
+if [[ -n "$PUBLIC_URL" ]]; then
+  export OPENAVATARCHAT_PUBLIC_URL="$PUBLIC_URL"
+else
+  unset OPENAVATARCHAT_PUBLIC_URL
+fi
 export OPENAVATAR_WEB_SEARCH_MODE="$WEB_SEARCH_MODE"
 export OPENAVATAR_WEB_SEARCH_ALWAYS="$WEB_SEARCH_ALWAYS"
 export OPENAVATAR_WEB_SEARCH_TIMEOUT="$WEB_SEARCH_TIMEOUT"

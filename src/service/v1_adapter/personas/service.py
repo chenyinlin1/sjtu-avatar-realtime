@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import os
 from typing import Dict, Optional
-from uuid import uuid4
-
 from ..responses import V1HTTPException
 from .media_storage import MAX_FACE_BYTES, MAX_VOICE_BYTES, MediaStorageError, PersonaMediaStorage
 from .models import (
@@ -38,6 +38,11 @@ class PersonaService:
                 tenant_id=payload.tenant_id,
                 display_name=payload.display_name,
                 is_default=payload.is_default,
+                relationship=payload.relationship,
+                address_to_elder=payload.address_to_elder,
+                self_reference=payload.self_reference,
+                gender=payload.gender,
+                persona_prompt=payload.persona_prompt,
             )
         else:
             if existing.elder_id != payload.elder_id or existing.tenant_id != payload.tenant_id:
@@ -48,6 +53,11 @@ class PersonaService:
                 )
             record = existing
             record.display_name = payload.display_name
+            record.relationship = payload.relationship
+            record.address_to_elder = payload.address_to_elder
+            record.self_reference = payload.self_reference
+            record.gender = payload.gender
+            record.persona_prompt = payload.persona_prompt
             record.is_default = payload.is_default
             record.updated_at = timestamp
 
@@ -87,6 +97,9 @@ class PersonaService:
         content: bytes,
         ref_text: str,
         source_duration_ms: Optional[int] = None,
+        voice_id: Optional[str] = None,
+        model_name: Optional[str] = None,
+        clone_source_url: Optional[str] = None,
     ) -> Dict:
         if not ref_text:
             raise V1HTTPException("INVALID_PARAM", "ref_text is required", 400)
@@ -97,12 +110,16 @@ class PersonaService:
         except MediaStorageError as exc:
             raise V1HTTPException(exc.code, exc.message, exc.status_code) from exc
         timestamp = now_ms()
+        voice_status = AssetStatus.READY if voice_id else AssetStatus.PROCESSING
         record.voice = VoiceAsset(
-            status=AssetStatus.READY,
+            status=voice_status,
             ref_text=ref_text,
             sample_duration_ms=source_duration_ms if source_duration_ms is not None else stored.duration_ms,
-            voice_id=f"voice_{uuid4().hex}",
+            voice_id=voice_id,
+            model_name=model_name,
             sample_path=stored.stored_path,
+            clone_source_url=clone_source_url,
+            fail_reason=None if voice_id else "voice_id is not created; upload by audio_url for runtime voice clone",
             updated_at=timestamp,
         )
         record.updated_at = timestamp
@@ -121,7 +138,22 @@ class PersonaService:
             content, filename = self.media_storage.download(audio_url, MAX_VOICE_BYTES)
         except MediaStorageError as exc:
             raise V1HTTPException(exc.code, exc.message, exc.status_code) from exc
-        return self.upload_voice_bytes(persona_id, filename, content, ref_text, source_duration_ms)
+        target_model = self._voice_clone_target_model()
+        voice_id = self._create_voice_clone(
+            persona_id=persona_id,
+            audio_url=audio_url,
+            target_model=target_model,
+        )
+        return self.upload_voice_bytes(
+            persona_id,
+            filename,
+            content,
+            ref_text,
+            source_duration_ms,
+            voice_id=voice_id,
+            model_name=target_model,
+            clone_source_url=audio_url,
+        )
 
     def upload_face_bytes(self, persona_id: str, filename: str, content: bytes) -> Dict:
         records = self._load_records()
@@ -221,3 +253,29 @@ class PersonaService:
             self.media_storage.delete_persona_media(persona_id)
         except MediaStorageError as exc:
             raise V1HTTPException(exc.code, exc.message, exc.status_code) from exc
+
+    @staticmethod
+    def _voice_clone_target_model() -> str:
+        return os.getenv("V1_PERSONA_VOICE_TARGET_MODEL", "cosyvoice-v3-flash").strip() or "cosyvoice-v3-flash"
+
+    @staticmethod
+    def _voice_clone_prefix(persona_id: str) -> str:
+        digest = hashlib.sha256(persona_id.encode("utf-8")).hexdigest()[:8]
+        return f"p{digest}"
+
+    def _create_voice_clone(self, *, persona_id: str, audio_url: str, target_model: str) -> str:
+        from service.frontend_service.voice_clone_upload import (
+            create_cosyvoice_voice_clone,
+            is_voice_enrollment_download_error,
+        )
+
+        try:
+            return create_cosyvoice_voice_clone(
+                audio_url=audio_url,
+                target_model=target_model,
+                prefix=self._voice_clone_prefix(persona_id),
+                api_key=os.getenv("DASHSCOPE_API_KEY"),
+            )
+        except Exception as exc:
+            code = "UPSTREAM_TIMEOUT" if is_voice_enrollment_download_error(exc) else "INTERNAL_ERROR"
+            raise V1HTTPException(code, f"failed to create voice clone: {exc}", 502) from exc

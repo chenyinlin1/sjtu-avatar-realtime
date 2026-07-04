@@ -55,6 +55,8 @@ class FlashHeadContext(HandlerContext):
         self._current_tts_stream_key: Optional[str] = None
         self._stream_key_lock = threading.Lock()
         self._playback_streamer = None
+        self.shared_states = None
+        self._applied_condition_image_path: Optional[str] = None
 
     def init_playback_streamer(self):
         """Eagerly create a CLIENT_PLAYBACK lifecycle streamer.
@@ -166,6 +168,7 @@ class HandlerAvatarFlashHead(HandlerBase):
         self._handler_config: Optional[FlashHeadConfig] = None
         self._flashhead_algo_path: Optional[str] = None
         self._condition_image_path: Optional[str] = None
+        self._default_condition_image_path: Optional[str] = None
         self._condition_image_lock = threading.RLock()
 
     def get_handler_info(self) -> HandlerBaseInfo:
@@ -272,6 +275,7 @@ class HandlerAvatarFlashHead(HandlerBase):
                 use_face_crop=False,
             )
             self._condition_image_path = cond_image_path
+            self._default_condition_image_path = cond_image_path
 
             # Suppress per-step print() noise from generate() —
             # the pipeline gates those logs behind `if self.rank == 0`.
@@ -366,6 +370,7 @@ class HandlerAvatarFlashHead(HandlerBase):
         )
         context.output_data_definitions = self.output_data_definitions
         context.config = handler_config
+        context.shared_states = session_context.shared_states
 
         callbacks = context._build_callbacks()
         processor.set_callbacks(callbacks)
@@ -414,6 +419,7 @@ class HandlerAvatarFlashHead(HandlerBase):
         if inputs.type != ChatDataType.AVATAR_AUDIO:
             return
         context = cast(FlashHeadContext, context)
+        self._apply_runtime_condition_image(context)
 
         # --- Track TTS AVATAR_AUDIO stream via CLIENT_PLAYBACK lifecycle streams ---
         stream_key_str = inputs.stream_id.stream_key_str if inputs.stream_id else None
@@ -489,6 +495,30 @@ class HandlerAvatarFlashHead(HandlerBase):
             speech_id=speech_id,
             end_of_speech=speech_end,
         )
+
+
+    def _apply_runtime_condition_image(self, context: FlashHeadContext) -> None:
+        runtime = getattr(context.shared_states, "persona_runtime", None)
+        persona_face_path = runtime.get("face_image_path") if isinstance(runtime, dict) else None
+        target_path = persona_face_path or self._default_condition_image_path
+        if not target_path or context._applied_condition_image_path == target_path:
+            return
+        if not os.path.exists(target_path):
+            logger.warning(f"FlashHead: runtime condition image missing, fallback skipped: {target_path}")
+            return
+        try:
+            applied_path = context.processor.apply_reference_update(
+                lambda: self.update_condition_image(target_path)
+            )
+            context._applied_condition_image_path = target_path
+            if persona_face_path:
+                logger.info(
+                    f"FlashHead: using persona face persona_id={runtime.get('persona_id')} image={applied_path}"
+                )
+            else:
+                logger.info(f"FlashHead: using default face image={applied_path}")
+        except Exception as exc:
+            logger.opt(exception=exc).warning(f"FlashHead: failed to apply runtime condition image: {target_path}")
 
     def on_signal(self, context: HandlerContext, signal: ChatSignal):
         if not isinstance(context, FlashHeadContext):

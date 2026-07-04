@@ -61,6 +61,7 @@ class TTSContext(HandlerContext):
         self.api_links: Dict[StreamKey, BailianTTSSession] = {}
         self.dump_audio = False
         self.audio_dump_file = None
+        self.shared_states = None
 
     @classmethod
     def _create_session(cls, input_stream: ChatStreamIdentity) -> BailianTTSSession:
@@ -108,15 +109,32 @@ class TTSContext(HandlerContext):
             context=self,
             output_definition=streamer.data_definition,
             session=session)
+
+        model_name = handler.model_name
+        voice = handler.voice
+        instruction = handler.instruction
+        persona_runtime = self._get_persona_runtime()
+        if persona_runtime and persona_runtime.get("voice_id"):
+            voice = persona_runtime["voice_id"]
+            model_name = persona_runtime.get("voice_model_name") or model_name
+            logger.info(
+                f"TTS: using persona voice persona_id={persona_runtime.get('persona_id')} "
+                f"voice={voice} model={model_name}"
+            )
+
         synthesizer_kwargs = {
-            "model": handler.model_name,
-            "voice": handler.voice,
+            "model": model_name,
+            "voice": voice,
             "callback": callback,
             "format": AudioFormat.PCM_24000HZ_MONO_16BIT,
         }
-        if handler.instruction:
-            synthesizer_kwargs["instruction"] = handler.instruction
+        if instruction:
+            synthesizer_kwargs["instruction"] = instruction
         session.synthesizer = SpeechSynthesizer(**synthesizer_kwargs)
+
+    def _get_persona_runtime(self) -> Optional[Dict]:
+        runtime = getattr(self.shared_states, "persona_runtime", None)
+        return runtime if isinstance(runtime, dict) else None
 
     def handle_text_stream(self, data: ChatData, handler: 'HandlerTTS'):
         input_stream = data.stream_id
@@ -246,6 +264,7 @@ class HandlerTTS(HandlerBase, ABC):
         if not isinstance(handler_config, TTSConfig):
             handler_config = TTSConfig()
         context = TTSContext(session_context.session_info.session_id)
+        context.shared_states = session_context.shared_states
         if context.dump_audio:
             dump_file_path = os.path.join(DirectoryInfo.get_project_dir(), 'temp',
                                           f"dump_avatar_audio_{context.session_id}_{time.localtime().tm_hour}_{time.localtime().tm_min}.pcm")

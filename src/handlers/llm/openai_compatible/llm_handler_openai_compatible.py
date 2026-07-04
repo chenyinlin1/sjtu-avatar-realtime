@@ -142,6 +142,7 @@ class LLMContext(HandlerContext):
         self.scopemem = None
         self.emotional_support = None
         self.music_player_active = False
+        self.shared_states = None
 
 
 class HandlerLLM(HandlerBase, ABC):
@@ -190,6 +191,7 @@ class HandlerLLM(HandlerBase, ABC):
         if not isinstance(handler_config, LLMConfig):
             handler_config = LLMConfig()
         context = LLMContext(session_context.session_info.session_id)
+        context.shared_states = session_context.shared_states
         context.model_name = handler_config.model_name
         context.system_prompt = {'role': 'system', 'content': XIAOBAN_SYSTEM_PROMPT}
         context.api_key = handler_config.api_key
@@ -326,7 +328,7 @@ class HandlerLLM(HandlerBase, ABC):
         cancelled = False
         try:
             messages = [
-                context.system_prompt,
+                self._system_prompt_for_context(context),
             ] + current_content
             if context.scopemem is not None:
                 memory_context = self._build_scopemem_context(context, chat_text)
@@ -404,6 +406,18 @@ class HandlerLLM(HandlerBase, ABC):
         end_output = DataBundle(output_definition)
         end_output.set_main_data('')
         streamer.stream_data(end_output, finish_stream=True)
+
+
+    @staticmethod
+    def _system_prompt_for_context(context: LLMContext) -> Dict[str, str]:
+        base_prompt = context.system_prompt or {"role": "system", "content": ""}
+        content = base_prompt.get("content", "")
+        runtime = getattr(context.shared_states, "persona_runtime", None)
+        if isinstance(runtime, dict):
+            persona_prompt = runtime.get("persona_system_prompt")
+            if persona_prompt:
+                content = f"{content}\n\n【当前角色】\n{persona_prompt}"
+        return {"role": base_prompt.get("role", "system"), "content": content}
 
     def on_signal(self, context: HandlerContext, signal: ChatSignal):
         context = cast(LLMContext, context)

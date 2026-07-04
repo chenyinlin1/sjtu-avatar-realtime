@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Optional
+from typing import Dict, Optional
 
 from chat_engine.contexts.session_clock import SessionClock
 from chat_engine.contexts.session_history import SessionHistory, HistoryConfig
@@ -9,6 +9,7 @@ from chat_engine.data_models.session_info_data import SessionInfoData
 @dataclass
 class SharedStates:
     active: bool = False
+    persona_runtime: Optional[Dict] = None
 
 
 class SessionContext(object):

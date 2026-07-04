@@ -627,6 +627,31 @@ class FlashHeadProcessor:
         sample_frames = (((sample + 1) / 2).permute(1, 2, 3, 0).clip(0, 1) * 255).contiguous()
         return sample_frames
 
+    def apply_reference_update(self, update_func: Callable[[], str]) -> str:
+        """Run a pipeline reference-image update under the processor inference lock."""
+        with self._inference_lock:
+            applied_path = update_func()
+            self._refresh_reference_from_pipeline_locked()
+            return applied_path
+
+    def _refresh_reference_from_pipeline_locked(self):
+        self._initial_latent_1slice = self.pipeline.ref_img_latent[:, :1].clone()
+        self._latent_motion_frames = self._initial_latent_1slice.clone()
+        self._idle_frame = self._make_idle_frame(self.pipeline)
+        self._pending_audio = np.array([], dtype=np.float32)
+        self._pending_original_audio = np.array([], dtype=np.float32)
+        cached_audio_length = self.sample_rate * self.cached_audio_duration
+        init_audio = self._make_ambient_noise(cached_audio_length)
+        self._audio_deque = deque(init_audio.tolist(), maxlen=cached_audio_length)
+        drained = 0
+        while not self._output_queue.empty():
+            try:
+                self._output_queue.get_nowait()
+                drained += 1
+            except queue.Empty:
+                break
+        logger.info(f"FlashHead: reference image refreshed, drained_queue_items={drained}")
+
     def interrupt(self):
         """Interrupt current inference and clear all audio state.
 

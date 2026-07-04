@@ -30,6 +30,7 @@ from handlers.client.ws_client.ws_message_protocol import (
     MessageType,
     serialize_message,
 )
+from service.v1_adapter.personas.runtime import PersonaRuntimeError, PersonaRuntimeResolver
 
 
 _AV_SYNC_DIAG = os.getenv("AV_SYNC_DIAG", "").lower() in {"1", "true", "yes", "on"}
@@ -337,17 +338,61 @@ class RtcStream(AsyncAudioVideoStreamHandler):
         device_info = {
             "device_sn": device_sn,
             "elder_id": optional_text(payload.get("elder_id")),
+            "tenant_id": optional_text(payload.get("tenant_id")),
             "persona_id": optional_text(payload.get("persona_id")),
             "received_at": time.time(),
         }
+
+        persona_runtime = None
+        runtime_enabled = os.getenv("V1_PERSONA_RUNTIME_ENABLED", "1").strip().lower() not in {
+            "0", "false", "no", "off"
+        }
+        if runtime_enabled:
+            try:
+                persona_runtime = PersonaRuntimeResolver().resolve(
+                    persona_id=device_info["persona_id"],
+                    elder_id=device_info["elder_id"],
+                    tenant_id=device_info["tenant_id"],
+                )
+            except PersonaRuntimeError as exc:
+                if self.client_session_delegate.shared_states is not None:
+                    self.client_session_delegate.shared_states.persona_runtime = None
+                self._send_data_channel_json(
+                    "Error",
+                    request_id,
+                    {
+                        "code": exc.code,
+                        "message": exc.message,
+                    },
+                )
+                logger.warning(
+                    f"[{self.session_id}] DeviceInfo persona rejected: "
+                    f"code={exc.code}, message={exc.message}, "
+                    f"device_sn={device_info['device_sn']}, elder_id={device_info['elder_id']}, "
+                    f"tenant_id={device_info['tenant_id']}, persona_id={device_info['persona_id']}"
+                )
+                return
+
         setattr(self.client_session_delegate, "device_info", device_info)
+        if self.client_session_delegate.shared_states is not None:
+            self.client_session_delegate.shared_states.persona_runtime = persona_runtime
         logger.info(
             f"[{self.session_id}] DeviceInfo registered: "
             f"device_sn={device_info['device_sn']}, "
             f"elder_id={device_info['elder_id']}, "
-            f"persona_id={device_info['persona_id']}"
+            f"tenant_id={device_info['tenant_id']}, "
+            f"persona_id={device_info['persona_id']}, "
+            f"runtime_persona={persona_runtime.get('persona_id') if persona_runtime else None}"
         )
-        self._send_data_channel_json("DeviceInfoAck", request_id, {"ok": True})
+        self._send_data_channel_json(
+            "DeviceInfoAck",
+            request_id,
+            {
+                "ok": True,
+                "persona_active": bool(persona_runtime),
+                "persona_id": persona_runtime.get("persona_id") if persona_runtime else None,
+            },
+        )
 
     def set_channel(self, channel):
             super().set_channel(channel)

@@ -10,7 +10,12 @@ class PersonaUpsertRequest(BaseModel):
 
     elder_id: str = Field(min_length=1)
     tenant_id: str = Field(min_length=1)
+    relationship: Optional[str] = None
     display_name: str = Field(min_length=1)
+    address_to_elder: Optional[str] = None
+    self_reference: Optional[str] = None
+    gender: Optional[str] = None
+    persona_prompt: Optional[str] = None
     is_default: bool = False
 
     @field_validator("elder_id", "tenant_id", "display_name")
@@ -20,6 +25,14 @@ class PersonaUpsertRequest(BaseModel):
         if not stripped:
             raise ValueError("field must not be empty")
         return stripped
+
+    @field_validator("relationship", "address_to_elder", "self_reference", "gender", "persona_prompt")
+    @classmethod
+    def _strip_optional_text(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
 
 
 class VoiceUrlUploadRequest(BaseModel):

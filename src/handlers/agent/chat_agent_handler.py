@@ -263,6 +263,7 @@ class ChatAgentContext(HandlerContext):
         self.memory: Optional[SessionMemoryManager] = None
         self.compiler: Optional[PromptCompiler] = None
         self.tool_registry: Optional[ToolRegistry] = None
+        self.shared_states = None
 
         # OC Bridge components (Phase 3+4)
         self.oc_mcp_client = None
@@ -328,6 +329,7 @@ class ChatAgentHandler(HandlerBase, ABC):
     def create_context(self, session_context: SessionContext,
                        handler_config: Optional[HandlerBaseConfigModel] = None) -> HandlerContext:
         context = ChatAgentContext(session_context.session_info.session_id)
+        context.shared_states = session_context.shared_states
 
         if isinstance(handler_config, ChatAgentConfig):
             context.config = handler_config
@@ -672,10 +674,14 @@ class ChatAgentHandler(HandlerBase, ABC):
         Phase 4.2: L3(Mode)/L4(TaskBrief)/L5(Memory) 已移除，
         对应信息由 LLM 按需通过工具调用获取。
         """
-        # L2: Persona snapshot — prefer OC, fallback to local
+        # L2: Persona snapshot — prefer OC, then append runtime persona from DeviceInfo.
         persona_snapshot = ""
         if context.persona_mgr:
             persona_snapshot = context.persona_mgr.get_snapshot()
+        runtime = getattr(context.shared_states, "persona_runtime", None)
+        if isinstance(runtime, dict) and runtime.get("persona_system_prompt"):
+            runtime_snapshot = f"【当前角色】\n{runtime['persona_system_prompt']}"
+            persona_snapshot = (persona_snapshot + "\n\n" + runtime_snapshot).strip()
 
         # L3: 持续性环境状态快照
         env_state = ""
