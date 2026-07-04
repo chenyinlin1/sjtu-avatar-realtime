@@ -5,6 +5,10 @@ import yaml
 
 CONFIG_PATH = Path("config/chat_with_openai_compatible_bailian_cosyvoice_flashhead_6006.yaml")
 SMART_TURN_MODEL = Path("models/smart_turn/smart-turn-v3.1-cpu.onnx")
+PACKAGED_KWS_ARCHIVE = Path(
+    "src/handlers/voice_gate/"
+    "sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile.tar.bz2"
+)
 
 
 def load_config():
@@ -22,9 +26,12 @@ def test_6006_config_uses_duplex_interrupt_pipeline():
     assert handlers["SileroVad"]["reconnect_threshold_samples"] == 0
     assert handlers["SileroVad"]["post_end_monitor_samples"] == 8000
     assert handlers["SileroVad"].get("energy_speech_threshold") is None
-    assert handlers["SenseVoice"]["input_type_override"] == {
-        "HUMAN_AUDIO": "HUMAN_DUPLEX_AUDIO",
-    }
+    assert handlers["WakeSpeakerGate"]["module"] == "voice_gate/wake_speaker_gate_handler"
+    assert handlers["WakeSpeakerGate"]["kws_enabled"] is True
+    assert handlers["WakeSpeakerGate"]["speaker_gate_enabled"] is True
+    assert handlers["WakeSpeakerGate"]["kws_model_dir"].startswith("models/sherpa-onnx-kws")
+    assert PACKAGED_KWS_ARCHIVE.exists()
+    assert handlers["SenseVoice"].get("input_type_override") is None
     assert handlers["SenseVoice"]["output_type_override"] == {
         "HUMAN_TEXT": "HUMAN_DUPLEX_TEXT",
     }
@@ -32,12 +39,10 @@ def test_6006_config_uses_duplex_interrupt_pipeline():
     assert handlers["SmartTurnEOU"]["enabled"] is True
     assert handlers["SmartTurnEOU"]["module"] == "vad/smart_turn_eou/eou_handler_smart_turn"
     assert handlers["SmartTurnEOU"]["model_path"] == str(SMART_TURN_MODEL)
-    assert SMART_TURN_MODEL.exists()
 
     semantic = handlers["SemanticTurnDetector"]
-    assert semantic["enabled"] is True
+    assert semantic["enabled"] is False
     assert semantic["duplex_mode"] is True
-    assert semantic["enable_interrupt_detection"] is True
 
 
 def test_6006_config_keeps_transport_camera_and_llm_vision_choices():

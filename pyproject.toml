@@ -26,6 +26,7 @@ dependencies = [
     "scipy~=1.15.1",
     "setuptools>=69.5.1,<70",  # pkg_resources 在 setuptools 70+ 中被移除
     "soundfile~=0.13.1",
+    "sherpa-onnx>=1.10.0",
     "starlette~=0.41.3",
     "tqdm~=4.67.1",
     "typer>=0.15.1",  # gradio CLI 依赖

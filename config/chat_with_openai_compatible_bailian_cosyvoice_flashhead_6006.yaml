@@ -47,12 +47,31 @@ default:
         post_end_monitor_samples: 8000
         reconnect_threshold_samples: 0
         post_end_energy_threshold: -5
+      WakeSpeakerGate:
+        enabled: true
+        module: voice_gate/wake_speaker_gate_handler
+        wake_word: "小伴小伴"
+        kws_enabled: true
+        kws_model_dir: "models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile"
+        kws_auto_download: true
+        kws_model_url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile.tar.bz2"
+        kws_provider: "cpu"
+        speaker_gate_enabled: true
+        speaker_model_name: "iic/speech_eres2netv2_sv_zh-cn_16k-common"
+        speaker_device: "cpu"
+        speaker_threshold: 0.45
+        speaker_borderline_threshold: 0.40
+        speaker_soft_threshold: 0.45
+        speaker_grace_ms: 12000
+        speaker_grace_segments: 2
+        idle_timeout_ms: 90000
+        non_target_timeout_ms: 20000
+        wake_enrollment_ms: 1200
+        interrupt_probe_ms: 700
       SenseVoice:
         enabled: True
         module: asr/sensevoice/asr_handler_sensevoice
         model_name: "iic/SenseVoiceSmall"
-        input_type_override:
-          HUMAN_AUDIO: HUMAN_DUPLEX_AUDIO
         output_type_override:
           HUMAN_TEXT: HUMAN_DUPLEX_TEXT
       SmartTurnEOU:
@@ -65,7 +84,7 @@ default:
         input_type_override:
           HUMAN_AUDIO: HUMAN_DUPLEX_AUDIO
       SemanticTurnDetector:
-        enabled: true
+        enabled: false
         module: llm/semantic_turn_detector/semantic_turn_detector_handler
         duplex_mode: true
         api_url: "https://api.deepseek.com"
