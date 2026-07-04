@@ -31,6 +31,7 @@ from handlers.client.ws_client.ws_message_protocol import (
     serialize_message,
 )
 from service.v1_adapter.personas.runtime import PersonaRuntimeError, PersonaRuntimeResolver
+from engine_utils.conversation_audit_logger import audit_event
 
 
 _AV_SYNC_DIAG = os.getenv("AV_SYNC_DIAG", "").lower() in {"1", "true", "yes", "on"}
@@ -376,6 +377,14 @@ class RtcStream(AsyncAudioVideoStreamHandler):
         setattr(self.client_session_delegate, "device_info", device_info)
         if self.client_session_delegate.shared_states is not None:
             self.client_session_delegate.shared_states.persona_runtime = persona_runtime
+            self.client_session_delegate.shared_states.device_info = device_info
+        audit_event(
+            self.client_session_delegate,
+            "device_info_registered",
+            device_info=device_info,
+            persona_runtime=persona_runtime,
+            success=True,
+        )
         logger.info(
             f"[{self.session_id}] DeviceInfo registered: "
             f"device_sn={device_info['device_sn']}, "

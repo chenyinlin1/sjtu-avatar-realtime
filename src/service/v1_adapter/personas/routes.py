@@ -6,7 +6,7 @@ from fastapi import Depends, FastAPI, Query, Request
 from pydantic import BaseModel, ValidationError
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
-from ..auth import require_api_key
+from ..auth import require_secret_key
 from ..responses import V1HTTPException, v1_success
 from .schemas import FaceUrlUploadRequest, PersonaUpsertRequest, VoiceUrlUploadRequest
 from .service import PersonaService
@@ -55,7 +55,7 @@ def register_persona_routes(app: FastAPI, service: PersonaService = _service) ->
         request: Request,
         elder_id: str = Query(..., min_length=1),
         tenant_id: str = Query(..., min_length=1),
-        _auth: None = Depends(require_api_key),
+        _auth: None = Depends(require_secret_key),
     ):
         return v1_success(service.list_personas(elder_id=elder_id, tenant_id=tenant_id), request)
 
@@ -64,7 +64,7 @@ def register_persona_routes(app: FastAPI, service: PersonaService = _service) ->
         request: Request,
         persona_id: str,
         payload: PersonaUpsertRequest,
-        _auth: None = Depends(require_api_key),
+        _auth: None = Depends(require_secret_key),
     ):
         return v1_success(service.upsert_persona(persona_id, payload), request)
 
@@ -72,7 +72,7 @@ def register_persona_routes(app: FastAPI, service: PersonaService = _service) ->
     async def get_persona(
         request: Request,
         persona_id: str,
-        _auth: None = Depends(require_api_key),
+        _auth: None = Depends(require_secret_key),
     ):
         return v1_success(service.get_persona(persona_id), request)
 
@@ -80,7 +80,7 @@ def register_persona_routes(app: FastAPI, service: PersonaService = _service) ->
     async def delete_persona(
         request: Request,
         persona_id: str,
-        _auth: None = Depends(require_api_key),
+        _auth: None = Depends(require_secret_key),
     ):
         return v1_success(service.delete_persona(persona_id), request)
 
@@ -88,7 +88,7 @@ def register_persona_routes(app: FastAPI, service: PersonaService = _service) ->
     async def upload_voice(
         request: Request,
         persona_id: str,
-        _auth: None = Depends(require_api_key),
+        _auth: None = Depends(require_secret_key),
     ):
         content_type = request.headers.get("content-type", "").lower()
         if "multipart/form-data" in content_type:
@@ -122,7 +122,7 @@ def register_persona_routes(app: FastAPI, service: PersonaService = _service) ->
     async def upload_face(
         request: Request,
         persona_id: str,
-        _auth: None = Depends(require_api_key),
+        _auth: None = Depends(require_secret_key),
     ):
         content_type = request.headers.get("content-type", "").lower()
         if "multipart/form-data" in content_type:
@@ -144,7 +144,7 @@ def register_persona_routes(app: FastAPI, service: PersonaService = _service) ->
     async def reset_voice(
         request: Request,
         persona_id: str,
-        _auth: None = Depends(require_api_key),
+        _auth: None = Depends(require_secret_key),
     ):
         return v1_success(service.reset_voice(persona_id), request)
 
@@ -152,6 +152,6 @@ def register_persona_routes(app: FastAPI, service: PersonaService = _service) ->
     async def reset_face(
         request: Request,
         persona_id: str,
-        _auth: None = Depends(require_api_key),
+        _auth: None = Depends(require_secret_key),
     ):
         return v1_success(service.reset_face(persona_id), request)

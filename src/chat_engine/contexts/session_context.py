@@ -10,6 +10,8 @@ from chat_engine.data_models.session_info_data import SessionInfoData
 class SharedStates:
     active: bool = False
     persona_runtime: Optional[Dict] = None
+    device_info: Optional[Dict] = None
+    client_endpoint: Optional[str] = None
 
 
 class SessionContext(object):

@@ -29,6 +29,11 @@ async def require_api_key(x_api_key: Optional[str] = Header(default=None, alias=
     _require_matching_key(x_api_key, expected, "API_KEY is not configured")
 
 
+async def require_secret_key(secret_key: Optional[str] = Header(default=None, alias="secretKey")) -> None:
+    expected = _configured_key("DEVICE_SECRET_KEY", "DEVICE_KEY", "CHATROBOT_SECRET_KEY")
+    _require_matching_key(secret_key, expected, "DEVICE_SECRET_KEY is not configured")
+
+
 async def require_device_key(
     x_device_key: Optional[str] = Header(default=None, alias="X-Device-Key"),
     secret_key: Optional[str] = Header(default=None, alias="secretKey"),

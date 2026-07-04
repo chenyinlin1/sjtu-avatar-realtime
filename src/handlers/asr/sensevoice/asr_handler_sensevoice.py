@@ -20,6 +20,7 @@ from funasr import AutoModel
 
 from engine_utils.directory_info import DirectoryInfo
 from engine_utils.general_slicer import SliceContext, slice_data
+from engine_utils.conversation_audit_logger import audit_event
 
 
 class ASRConfig(HandlerBaseConfigModel, BaseModel):
@@ -40,6 +41,7 @@ class ASRContext(HandlerContext):
         self.current_audio_stream_key: Optional[str] = None
         self.current_asr_stream_start_mono: Optional[float] = None
         self.current_asr_audio_samples: int = 0
+        self.shared_states = None
 
         self.dump_audio = True
         self.audio_dump_file = None
@@ -100,6 +102,7 @@ class HandlerASR(HandlerBase, ABC):
         if not isinstance(handler_config, ASRConfig):
             handler_config = ASRConfig()
         context = ASRContext(session_context.session_info.session_id)
+        context.shared_states = session_context.shared_states
         return context
 
     def start_context(self, session_context, handler_context):
@@ -178,6 +181,18 @@ class HandlerASR(HandlerBase, ABC):
         )
         if len(output_text) == 0:
             return
+        audit_event(
+            context,
+            "asr_transcript",
+            stream_identity=inputs.stream_id,
+            create_turn=True,
+            provider="sensevoice",
+            model=self.model_name,
+            transcript=output_text,
+            success=True,
+            audio_samples=int(output_audio.shape[0]),
+            audio_dump_path=getattr(context.audio_dump_file, "name", None),
+        )
         output = DataBundle(output_definition)
         output.set_main_data(output_text)
         context.submit_data(output, finish_stream=True)

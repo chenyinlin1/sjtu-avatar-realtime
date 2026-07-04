@@ -17,6 +17,7 @@ from chat_engine.data_models.chat_data_type import ChatDataType
 from chat_engine.contexts.session_context import SessionContext
 from chat_engine.data_models.runtime_data.data_bundle import DataBundle, DataBundleDefinition, DataBundleEntry
 from engine_utils.directory_info import DirectoryInfo
+from engine_utils.conversation_audit_logger import audit_event
 from dashscope.audio.tts_v2 import SpeechSynthesizer, ResultCallback, AudioFormat
 import dashscope
 
@@ -43,6 +44,10 @@ class BailianTTSSession:
     output_stream_key: Optional[StreamKey] = None
     synthesizer: Optional[SpeechSynthesizer] = None
     cancelled: bool = False
+    text_parts: list = field(default_factory=list)
+    turn_id: Optional[str] = None
+    model_name: Optional[str] = None
+    voice: Optional[str] = None
 
     def reset(self):
         self.cancelled = True
@@ -99,6 +104,15 @@ class TTSContext(HandlerContext):
             config=ChatStreamConfig(cancelable=True)
         )
         session.output_stream_key = output_stream_id.key
+        session.turn_id = audit_event(
+            self,
+            "tts_start",
+            stream_identity=input_stream,
+            bind_stream_key=str(session.output_stream_key),
+            input_stream_key=str(input_stream.key) if input_stream.key else None,
+            output_stream_key=str(session.output_stream_key),
+            success=None,
+        )
         return session
 
     def _ensure_synthesizer(self, session: BailianTTSSession, handler: 'HandlerTTS'):
@@ -121,6 +135,8 @@ class TTSContext(HandlerContext):
                 f"TTS: using persona voice persona_id={persona_runtime.get('persona_id')} "
                 f"voice={voice} model={model_name}"
             )
+        session.model_name = model_name
+        session.voice = voice
 
         synthesizer_kwargs = {
             "model": model_name,
@@ -157,6 +173,7 @@ class TTSContext(HandlerContext):
 
         try:
             if has_text:
+                session.text_parts.append(text)
                 self._ensure_synthesizer(session, handler)
                 logger.info(f'streaming_call {text}')
                 session.synthesizer.streaming_call(text)
@@ -171,6 +188,17 @@ class TTSContext(HandlerContext):
                 session.synthesizer = None
                 self.api_links.pop(input_stream_key, None)
         except Exception as e:
+            audit_event(
+                self,
+                "tts_error",
+                stream_identity=session.input_stream_id,
+                turn_id=session.turn_id,
+                input_text="".join(session.text_parts),
+                model=session.model_name,
+                voice=session.voice,
+                error=str(e),
+                success=False,
+            )
             logger.error(e)
             session.reset()
             self.api_links.pop(input_stream_key, None)
@@ -389,12 +417,36 @@ class CosyvoiceCallBack(ResultCallback):
             self.context.submit_data(output)
             self.temp_bytes = b''
         self._submit_end_frame()
+        audit_event(
+            self.context,
+            "tts_success",
+            stream_identity=self.session.input_stream_id,
+            turn_id=self.session.turn_id,
+            input_text="".join(self.session.text_parts),
+            model=self.session.model_name,
+            voice=self.session.voice,
+            output_stream_key=str(self.session.output_stream_key) if self.session.output_stream_key else None,
+            audio_stored=False,
+            audio_path=None,
+            success=True,
+        )
         logger.info('TTS: Synthesis complete')
 
     def on_error(self, message) -> None:
         if self.is_cancelled:
             logger.info(f'TTS: Synthesis error after cancel (expected): {message}')
             return
+        audit_event(
+            self.context,
+            "tts_error",
+            stream_identity=self.session.input_stream_id,
+            turn_id=self.session.turn_id,
+            input_text="".join(self.session.text_parts),
+            model=self.session.model_name,
+            voice=self.session.voice,
+            error=str(message),
+            success=False,
+        )
         logger.error(f'TTS: Service error: {message}')
         self._submit_end_frame()
 

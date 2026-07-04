@@ -24,6 +24,7 @@ from dashscope.audio.asr import Recognition, RecognitionCallback, RecognitionRes
 
 from engine_utils.directory_info import DirectoryInfo
 from engine_utils.general_slicer import SliceContext, slice_data
+from engine_utils.conversation_audit_logger import audit_event
 
 
 class BailianASRConfig(HandlerBaseConfigModel, BaseModel):
@@ -100,6 +101,7 @@ class BailianASRContext(HandlerContext):
         super().__init__(session_id)
         self.config = None
         self.api_links: Dict[StreamKey, BailianASRSession] = {}
+        self.shared_states = None
 
         self.dump_audio = True
         self.audio_dump_file = None
@@ -224,6 +226,20 @@ class BailianASRContext(HandlerContext):
                 self.api_links.pop(input_stream_key, None)
                 return
 
+            output_stream_key = output_streamer.current_stream.identity.stream_key_str
+            audit_event(
+                self,
+                "asr_transcript",
+                stream_identity=session.input_stream_id,
+                bind_stream_key=output_stream_key,
+                create_turn=True,
+                provider="bailian_asr",
+                model=handler.model_name,
+                transcript=output_text,
+                success=True,
+                audio_samples=int(output_audio.shape[0]),
+                audio_dump_path=getattr(self.audio_dump_file, "name", None),
+            )
             output = DataBundle(output_streamer.data_definition)
             output.set_main_data(output_text)
             output.add_meta("human_text_end", True)
@@ -306,6 +322,7 @@ class HandlerASR(HandlerBase, ABC):
         if not isinstance(handler_config, BailianASRConfig):
             handler_config = BailianASRConfig()
         context = BailianASRContext(session_context.session_info.session_id)
+        context.shared_states = session_context.shared_states
         return context
 
     def start_context(self, session_context, handler_context):

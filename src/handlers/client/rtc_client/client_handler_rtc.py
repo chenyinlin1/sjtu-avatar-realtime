@@ -705,6 +705,7 @@ class ClientHandlerRtc(ClientHandlerBase):
             handler_config = ClientRtcConfigModel()
         context = ClientRtcContext(session_context.session_info.session_id)
         context.config = handler_config
+        session_context.shared_states.client_endpoint = "rtc"
         return context
 
     def start_context(self, session_context: SessionContext, handler_context: HandlerContext):
@@ -715,6 +716,7 @@ class ClientHandlerRtc(ClientHandlerBase):
         handler_context = cast(ClientRtcContext, handler_context)
         session_delegate = cast(RtcClientSessionDelegate, session_delegate)
 
+        session_delegate.session_id = session_context.session_info.session_id
         session_delegate.clock = session_context.get_clock()
         session_delegate.data_submitter = handler_context.data_submitter
         session_delegate.signal_emitter = handler_context.signal_emitter

@@ -221,6 +221,7 @@ class WsClientHandler(ClientHandlerBase):
         
         context = WsClientContext(session_context.session_info.session_id)
         context.config = handler_config
+        session_context.shared_states.client_endpoint = "ws"
         return context
     
     def start_context(self, session_context: SessionContext, handler_context: HandlerContext):

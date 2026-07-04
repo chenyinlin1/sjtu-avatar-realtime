@@ -41,6 +41,7 @@ from chat_engine.data_models.runtime_data.data_bundle import (
 
 from handlers.avatar.flashhead.flashhead_config import FlashHeadConfig
 from handlers.avatar.flashhead.flashhead_processor import FlashHeadProcessor, FlashHeadProcessorCallbacks
+from engine_utils.conversation_audit_logger import audit_event
 
 
 class FlashHeadContext(HandlerContext):
@@ -92,6 +93,15 @@ class FlashHeadContext(HandlerContext):
                     )
                     return
                 if speech_id is not None and speech_id != current_key:
+                    audit_event(
+                        self,
+                        "digital_human_error",
+                        stream_key=current_key,
+                        avatar="flashhead",
+                        speech_id=speech_id,
+                        error="speech_id mismatch",
+                        success=False,
+                    )
                     logger.warning(
                         f"FlashHead: on_speech_end speech_id mismatch, "
                         f"callback={speech_id}, current={current_key}, skip closing"
@@ -100,6 +110,14 @@ class FlashHeadContext(HandlerContext):
                 self._current_tts_stream_key = None
             if streamer is not None:
                 streamer.finish_current()
+                audit_event(
+                    self,
+                    "digital_human_success",
+                    stream_key=current_key,
+                    avatar="flashhead",
+                    speech_id=speech_id,
+                    success=True,
+                )
                 logger.info(f"FlashHead: CLIENT_PLAYBACK stream closed for stream_key={current_key}")
 
         return FlashHeadProcessorCallbacks(
@@ -443,6 +461,14 @@ class HandlerAvatarFlashHead(HandlerBase):
             if streamer is not None:
                 sources = [inputs.stream_id] if inputs.stream_id else []
                 streamer.open_stream(sources=sources, name=f"playback:{stream_key_str}")
+                audit_event(
+                    context,
+                    "digital_human_start",
+                    stream_identity=inputs.stream_id,
+                    stream_key=stream_key_str,
+                    avatar="flashhead",
+                    success=None,
+                )
                 logger.info(f"FlashHead: CLIENT_PLAYBACK stream opened for stream_key={stream_key_str}")
 
         # --- Extract audio data ---
@@ -452,6 +478,15 @@ class HandlerAvatarFlashHead(HandlerBase):
         audio_array = inputs.data.get_main_data()
 
         if audio_array is None:
+            audit_event(
+                context,
+                "digital_human_error",
+                stream_identity=inputs.stream_id,
+                stream_key=speech_id,
+                avatar="flashhead",
+                error="audio data is None",
+                success=False,
+            )
             audio_array = np.zeros([512], dtype=np.float32)
             logger.error(f"FlashHead: Audio data is None, fill with silence, speech_id: {speech_id}")
 

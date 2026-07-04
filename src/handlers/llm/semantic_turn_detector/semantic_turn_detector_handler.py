@@ -36,6 +36,7 @@ from chat_engine.data_models.chat_data.chat_data_model import ChatData
 from chat_engine.data_models.chat_engine_config_data import ChatEngineConfigModel, HandlerBaseConfigModel
 from chat_engine.data_models.runtime_data.data_bundle import DataBundle, DataBundleDefinition, DataBundleEntry
 from chat_engine.data_models.runtime_data.event_model import EventType
+from engine_utils.conversation_audit_logger import audit_event
 
 
 DEEPSEEK_DISABLE_THINKING_EXTRA_BODY = {"thinking": {"type": "disabled"}}
@@ -106,6 +107,7 @@ class SemanticTurnDetectorContext(HandlerContext):
         # Legacy deduplication fields (kept for backward compatibility, may be removed later)
         self.last_partial_text: str = ""  # Last processed partial text
         self.last_partial_avatar_text: str = ""  # Avatar text at last processing (to detect new conversation turns)
+        self.shared_states = None
 
 
 class SemanticTurnDetectorHandler(HandlerBase):
@@ -197,6 +199,7 @@ Your response:
         context = SemanticTurnDetectorContext(session_context.session_info.session_id)
         if isinstance(handler_config, SemanticTurnDetectorConfig):
             context.config = handler_config
+        context.shared_states = session_context.shared_states
         return context
 
     def warmup_context(self, session_context: SessionContext, handler_context: HandlerContext):
@@ -1059,6 +1062,17 @@ Your response:
                 f"session={context.session_id} mono={llm_start_mono:.6f} "
                 f"model={context.config.model_name}"
             )
+            turn_id = audit_event(
+                context,
+                "llm_input",
+                stream_key=context.current_utterance_stream_key,
+                create_turn=True,
+                llm_stage="semantic_interrupt",
+                model=context.config.model_name,
+                messages=[{"role": "user", "content": prompt}],
+                user_text=user_text,
+                avatar_text=avatar_text,
+            )
             response = context.llm_client.chat.completions.create(
                 model=context.config.model_name,
                 messages=[{"role": "user", "content": prompt}],
@@ -1069,6 +1083,16 @@ Your response:
             llm_done_mono = time.monotonic()
             # Log response details
             result = response.choices[0].message.content.strip()
+            audit_event(
+                context,
+                "llm_output",
+                stream_key=context.current_utterance_stream_key,
+                turn_id=turn_id,
+                llm_stage="semantic_interrupt",
+                model=getattr(response, "model", context.config.model_name),
+                output_text=result,
+                success=True,
+            )
             logger.info(f"SemanticTurnDetector LLM response: result={result}, model={response.model}")
             logger.info(
                 f"INTERRUPT_TRACE llm_interrupt_request_done "
@@ -1115,6 +1139,16 @@ Your response:
                 user_text=user_text
             )
 
+            turn_id = audit_event(
+                context,
+                "llm_input",
+                stream_key=context.current_utterance_stream_key,
+                create_turn=True,
+                llm_stage="semantic_completion",
+                model=context.config.model_name,
+                messages=[{"role": "user", "content": prompt}],
+                user_text=user_text,
+            )
             response = context.llm_client.chat.completions.create(
                 model=context.config.model_name,
                 messages=[{"role": "user", "content": prompt}],
@@ -1124,6 +1158,16 @@ Your response:
             )
 
             result = response.choices[0].message.content.strip()
+            audit_event(
+                context,
+                "llm_output",
+                stream_key=context.current_utterance_stream_key,
+                turn_id=turn_id,
+                llm_stage="semantic_completion",
+                model=getattr(response, "model", context.config.model_name),
+                output_text=result,
+                success=True,
+            )
             logger.debug(f"SemanticTurnDetector completion detection: {result}")
             return result
         except Exception as e:
@@ -1295,6 +1339,17 @@ Your response:
                 f"session={context.session_id} mono={intent_start_mono:.6f} "
                 f"model={context.config.interrupt_judge_model_name}"
             )
+            turn_id = audit_event(
+                context,
+                "llm_input",
+                stream_key=context.current_utterance_stream_key,
+                create_turn=True,
+                llm_stage="semantic_interrupt_intent",
+                model=context.config.interrupt_judge_model_name,
+                messages=[{"role": "user", "content": prompt}],
+                interrupt_text=interrupt_text,
+                avatar_text=avatar_text,
+            )
             response = context.interrupt_judge_llm_client.chat.completions.create(
                 model=context.config.interrupt_judge_model_name,
                 messages=[{"role": "user", "content": prompt}],
@@ -1305,6 +1360,16 @@ Your response:
 
             intent_done_mono = time.monotonic()
             result = response.choices[0].message.content.strip()
+            audit_event(
+                context,
+                "llm_output",
+                stream_key=context.current_utterance_stream_key,
+                turn_id=turn_id,
+                llm_stage="semantic_interrupt_intent",
+                model=getattr(response, "model", context.config.interrupt_judge_model_name),
+                output_text=result,
+                success=True,
+            )
             logger.info(f"SemanticTurnDetector: Interrupt intent judgment response: {result}")
             logger.info(
                 f"INTERRUPT_TRACE llm_intent_request_done "
@@ -1496,6 +1561,16 @@ Your response:
             logger.info(f"SemanticTurnDetector: Output stream was auto-cancelled, skipping output")
             return
 
+        output_stream_key = output_streamer.current_stream.identity.stream_key_str
+        audit_event(
+            context,
+            "semantic_human_text",
+            stream_identity=inputs.stream_id,
+            bind_stream_key=output_stream_key,
+            create_turn=True,
+            text=text,
+            success=True,
+        )
         output_streamer.stream_data(output_bundle, finish_stream=True)
         logger.info(f"SemanticTurnDetector: Submitted HUMAN_TEXT: {text[:50]}...")
 

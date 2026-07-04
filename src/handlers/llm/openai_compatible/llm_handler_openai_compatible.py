@@ -23,6 +23,7 @@ from .emotional_support_adapter import EmotionalSupportSkillAdapter
 from .scopemem_adapter import OpenAvatarScopeMemory
 from .search_engine import format_search_results, search_bocha
 from chat_engine.data_models.chat_stream_config import ChatStreamConfig
+from engine_utils.conversation_audit_logger import audit_event
 
 try:
     from handlers.agent.tools.music_request import MusicRequestTool
@@ -146,6 +147,7 @@ class LLMContext(HandlerContext):
         self.emotional_support = None
         self.music_player_active = False
         self.shared_states = None
+        self.current_audit_turn_id = None
 
 
 class HandlerLLM(HandlerBase, ABC):
@@ -255,6 +257,7 @@ class HandlerLLM(HandlerBase, ABC):
                 memory_max_chars=handler_config.scopemem_memory_max_chars,
                 extract_batch_size=handler_config.scopemem_extract_batch_size,
                 clear_on_start=handler_config.scopemem_clear_on_start,
+                audit_context=context,
             )
             logger.info(f"ScopeMem memory enabled with store: {store_path}")
         return context
@@ -297,9 +300,30 @@ class HandlerLLM(HandlerBase, ABC):
             streamer.stream_data(end_output, name="openai_compatible", config=ChatStreamConfig(cancelable=True), finish_stream=True)
             return
         logger.info(f'llm input {context.model_name} {chat_text} ')
+        turn_id = audit_event(
+            context,
+            "conversation_text",
+            stream_identity=inputs.stream_id,
+            bind_stream_key=stream_key,
+            create_turn=True,
+            text=chat_text,
+            source="human_text",
+        )
+        context.current_audit_turn_id = turn_id
         music_control = self._extract_music_control(chat_text)
         if music_control:
             logger.info(f"Music control detected: {music_control}")
+            audit_event(
+                context,
+                "llm_skipped",
+                stream_identity=inputs.stream_id,
+                bind_stream_key=stream_key,
+                turn_id=turn_id,
+                llm_stage="main_response",
+                reason="music_control",
+                user_text=chat_text,
+                control=music_control,
+            )
             self._handle_music_control(
                 context,
                 music_control,
@@ -311,11 +335,32 @@ class HandlerLLM(HandlerBase, ABC):
             return
         if context.music_player_active:
             logger.info(f"Music player active, ignore non-control ASR text: {chat_text}")
+            audit_event(
+                context,
+                "llm_skipped",
+                stream_identity=inputs.stream_id,
+                bind_stream_key=stream_key,
+                turn_id=turn_id,
+                llm_stage="main_response",
+                reason="music_player_active",
+                user_text=chat_text,
+            )
             self._finish_empty_response(context, output_definition, streamer, stream_key)
             return
         music_query = self._extract_music_request(chat_text)
         if music_query:
             logger.info(f"Music request detected: {music_query}")
+            audit_event(
+                context,
+                "llm_skipped",
+                stream_identity=inputs.stream_id,
+                bind_stream_key=stream_key,
+                turn_id=turn_id,
+                llm_stage="main_response",
+                reason="music_request",
+                user_text=chat_text,
+                music_query=music_query,
+            )
             self._handle_music_request(
                 context,
                 music_query,
@@ -358,6 +403,17 @@ class HandlerLLM(HandlerBase, ABC):
             if context.web_search_mode == "dashscope":
                 logger.warning("DashScope native search is unavailable for DeepSeek; continuing without provider-native search")
 
+            audit_event(
+                context,
+                "llm_input",
+                stream_identity=inputs.stream_id,
+                bind_stream_key=stream_key,
+                turn_id=turn_id,
+                llm_stage="main_response",
+                model=context.model_name,
+                messages=messages,
+                user_text=chat_text,
+            )
             completion = context.client.chat.completions.create(
                 model=context.model_name,
                 messages=messages,
@@ -388,6 +444,27 @@ class HandlerLLM(HandlerBase, ABC):
                 context.history.add_message(HistoryMessage(role="avatar", content=context.output_texts))
                 if context.scopemem is not None:
                     context.scopemem.remember_turn(chat_text, context.output_texts)
+                    audit_event(
+                        context,
+                        "memory_add",
+                        turn_id=turn_id,
+                        memory_provider="scopemem",
+                        operation="remember_turn",
+                        user_text=chat_text,
+                        assistant_text=context.output_texts,
+                        success=True,
+                    )
+            audit_event(
+                context,
+                "llm_output",
+                stream_key=stream_key,
+                turn_id=turn_id,
+                llm_stage="main_response",
+                model=context.model_name,
+                output_text=context.output_texts,
+                success=not cancelled,
+                cancelled=cancelled,
+            )
         except Exception as e:
             logger.error(e)
             if isinstance(e, APIStatusError):
@@ -399,11 +476,23 @@ class HandlerLLM(HandlerBase, ABC):
             else:
                 # Handle APIConnectionError and other exceptions
                 error_text = f"连接错误: {e}"
+            audit_event(
+                context,
+                "llm_error",
+                stream_key=stream_key,
+                turn_id=turn_id,
+                llm_stage="main_response",
+                model=context.model_name,
+                error=str(e),
+                output_text=error_text,
+                success=False,
+            )
             output = DataBundle(output_definition)
             output.set_main_data(error_text)
             streamer.stream_data(output, finish_stream=True)
         context.input_texts = ''
         context.output_texts = ''
+        context.current_audit_turn_id = None
         if cancelled:
             return
         if stream_key:
@@ -454,9 +543,28 @@ class HandlerLLM(HandlerBase, ABC):
             memories = context.scopemem.search(query)
         except Exception as e:
             logger.warning(f"ScopeMem memory retrieval failed: {e}")
+            audit_event(
+                context,
+                "memory_read",
+                turn_id=context.current_audit_turn_id,
+                memory_provider="scopemem",
+                query=query,
+                success=False,
+                error=str(e),
+            )
             return None
         if not memories:
             logger.info(f"ScopeMem used memories: count=0 query={query[:120]!r}")
+            audit_event(
+                context,
+                "memory_read",
+                turn_id=context.current_audit_turn_id,
+                memory_provider="scopemem",
+                query=query,
+                success=True,
+                result_count=0,
+                items=[],
+            )
             return None
         lines = []
         used_chars = 0
@@ -474,6 +582,16 @@ class HandlerLLM(HandlerBase, ABC):
             used_chars += len(line) + 1
         if not lines:
             logger.info(f"ScopeMem used memories: count=0 query={query[:120]!r}")
+            audit_event(
+                context,
+                "memory_read",
+                turn_id=context.current_audit_turn_id,
+                memory_provider="scopemem",
+                query=query,
+                success=True,
+                result_count=0,
+                items=[],
+            )
             return None
         details = []
         for index, item, text in used_items:
@@ -484,6 +602,19 @@ class HandlerLLM(HandlerBase, ABC):
             "ScopeMem used memories: "
             f"count={len(used_items)} query={query[:120]!r} "
             f"items={' | '.join(details)}"
+        )
+        audit_event(
+            context,
+            "memory_read",
+            turn_id=context.current_audit_turn_id,
+            memory_provider="scopemem",
+            query=query,
+            success=True,
+            result_count=len(used_items),
+            items=[
+                {"index": index, "score": item.get("score"), "text": text}
+                for index, item, text in used_items
+            ],
         )
         return {
             "role": "user",
@@ -501,6 +632,15 @@ class HandlerLLM(HandlerBase, ABC):
             return ""
         if not context.bocha_api_key:
             logger.warning("Bocha web search is enabled but BOCHA_API_KEY is not set.")
+            audit_event(
+                context,
+                "search_operation",
+                turn_id=context.current_audit_turn_id,
+                search_provider="bocha",
+                query=query,
+                success=False,
+                error="BOCHA_API_KEY is not set",
+            )
             return ""
         try:
             results = search_bocha(
@@ -512,9 +652,33 @@ class HandlerLLM(HandlerBase, ABC):
             )
         except Exception as e:
             logger.warning(f"Bocha web search failed: {e}")
+            audit_event(
+                context,
+                "search_operation",
+                turn_id=context.current_audit_turn_id,
+                search_provider="bocha",
+                query=query,
+                success=False,
+                error=str(e),
+            )
             return ""
 
+        result_items = [
+            {"title": result.title, "url": result.url, "snippet": result.snippet}
+            for result in results
+        ]
         formatted = format_search_results(results)
+        audit_event(
+            context,
+            "search_operation",
+            turn_id=context.current_audit_turn_id,
+            search_provider="bocha",
+            query=query,
+            success=True,
+            result_count=len(result_items),
+            results=result_items,
+            formatted=formatted,
+        )
         if not formatted:
             return ""
         return (

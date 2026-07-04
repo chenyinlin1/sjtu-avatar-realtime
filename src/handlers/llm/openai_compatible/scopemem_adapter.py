@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from loguru import logger
+from engine_utils.conversation_audit_logger import audit_event
 
 
 MEMORY_SYSTEM_TEMPLATE = """{system_prompt}
@@ -81,9 +82,10 @@ def _tokenize_for_search(text: str) -> List[str]:
 class OpenAvatarMemoryLLM:
     """ScopeMem memory LLM adapter backed by OpenAvatarChat's configured client."""
 
-    def __init__(self, *, client, model_name: str):
+    def __init__(self, *, client, model_name: str, audit_context=None):
         self.client = client
         self.model_name = model_name
+        self.audit_context = audit_context
         self.call_counts: Dict[str, int] = {}
         self.token_counts: Dict[str, Dict[str, int]] = {}
 
@@ -137,6 +139,15 @@ class OpenAvatarMemoryLLM:
         return memories if isinstance(memories, list) else []
 
     def _chat_json(self, stage: str, messages: List[Dict[str, str]]) -> Dict[str, Any]:
+        turn_id = getattr(self.audit_context, "current_audit_turn_id", None)
+        audit_event(
+            self.audit_context,
+            "llm_input",
+            turn_id=turn_id,
+            llm_stage=f"scopemem_{stage}",
+            model=self.model_name,
+            messages=messages,
+        )
         try:
             response = self.client.chat.completions.create(
                 model=self.model_name,
@@ -151,8 +162,26 @@ class OpenAvatarMemoryLLM:
             for key in counts:
                 counts[key] += int(getattr(usage, key, 0) or 0)
             text = response.choices[0].message.content or ""
+            audit_event(
+                self.audit_context,
+                "llm_output",
+                turn_id=turn_id,
+                llm_stage=f"scopemem_{stage}",
+                model=getattr(response, "model", self.model_name),
+                output_text=text,
+                success=True,
+            )
             return _safe_json_loads(text)
         except Exception as exc:
+            audit_event(
+                self.audit_context,
+                "llm_error",
+                turn_id=turn_id,
+                llm_stage=f"scopemem_{stage}",
+                model=self.model_name,
+                error=str(exc),
+                success=False,
+            )
             logger.warning(f"ScopeMem {stage} LLM call failed: {exc}")
             return {}
 
@@ -173,6 +202,7 @@ class OpenAvatarScopeMemory:
         extract_batch_size: int = 8,
         clear_on_start: bool = False,
         dims: int = 256,
+        audit_context=None,
     ):
         _ensure_bundled_scopemem()
         from scopemem import ScopeMemConfig, ScopeMemory
@@ -186,6 +216,7 @@ class OpenAvatarScopeMemory:
         self.extract_batch_size = max(1, int(extract_batch_size or 1))
         self.pending_messages: List[Dict[str, Any]] = []
         self.pending_since = ""
+        self.audit_context = audit_context
 
         store_path_obj = Path(store_path)
         run_dir = store_path_obj.parent.parent
@@ -215,7 +246,7 @@ class OpenAvatarScopeMemory:
         )
         self.memory = ScopeMemory(
             config,
-            llm=OpenAvatarMemoryLLM(client=client, model_name=model_name),
+            llm=OpenAvatarMemoryLLM(client=client, model_name=model_name, audit_context=audit_context),
             embedder=HashTextEmbedder(dims=dims),
         )
 
@@ -332,10 +363,31 @@ class OpenAvatarScopeMemory:
             "ScopeMem extracting memories: "
             f"reason={reason} messages={len(messages)} turns={len(messages) / 2:g}"
         )
+        turn_id = getattr(self.audit_context, "current_audit_turn_id", None)
+        audit_event(
+            self.audit_context,
+            "memory_store_add",
+            turn_id=turn_id,
+            memory_provider="scopemem",
+            reason=reason,
+            timestamp=timestamp,
+            messages=messages,
+            success=None,
+        )
         self.memory.add(
             messages,
             metadata={"speaker_a": self.user_name, "speaker_b": self.assistant_name, "timestamp": timestamp},
             parallel=False,
+        )
+        audit_event(
+            self.audit_context,
+            "memory_store_add",
+            turn_id=turn_id,
+            memory_provider="scopemem",
+            reason=reason,
+            timestamp=timestamp,
+            message_count=len(messages),
+            success=True,
         )
 
     def search(self, query: str) -> List[Dict[str, Any]]:
