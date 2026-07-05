@@ -23,8 +23,8 @@ class MusicControlTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "音乐播放器控制工具。当用户说暂停、继续、下一首、音量小一点、"
-            "音量大一点、静音或取消静音时使用。工具只返回结构化控制动作，"
+            "音乐播放器控制工具。当用户说暂停、继续、停止播放、退出播放、"
+            "下一首、音量小一点、音量大一点、静音或取消静音时使用。工具只返回结构化控制动作，"
             "实际播放由前端播放器执行。"
         )
 
@@ -35,7 +35,7 @@ class MusicControlTool(BaseTool):
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["pause", "resume", "next", "volume", "mute", "unmute"],
+                    "enum": ["pause", "resume", "stop", "next", "volume", "mute", "unmute"],
                     "description": "播放器控制动作。",
                 },
                 "delta": {
@@ -48,7 +48,7 @@ class MusicControlTool(BaseTool):
 
     def execute(self, args: Dict[str, Any]) -> ToolResult:
         action = str(args.get("action", "")).strip().lower()
-        if action not in {"pause", "resume", "next", "volume", "mute", "unmute"}:
+        if action not in {"pause", "resume", "stop", "next", "volume", "mute", "unmute"}:
             return ToolResult(success=False, error=f"Unsupported music control action: {action}")
         data = {
             "type": "music.control",

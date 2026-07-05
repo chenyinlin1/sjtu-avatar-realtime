@@ -33,6 +33,7 @@ from chat_engine.data_models.runtime_data.data_bundle import DataBundle, DataBun
 
 from handlers.agent.agent_data_models import PerceptionData, EnvironmentEvent
 from handlers.agent.memory.session_memory_manager import SessionMemoryManager, MemoryConfig
+from handlers.agent.tools.base_tool import ToolResult
 from handlers.agent.tools.tool_registry import ToolRegistry
 from handlers.agent.prompt.prompt_compiler import (
     PromptCompiler,
@@ -645,6 +646,11 @@ class ChatAgentHandler(HandlerBase, ABC):
                     perception_snapshot=perception_snapshot,
                 )
 
+            if self._handle_direct_music_command(context, full_text, output_definitions):
+                self._process_pending_events(context)
+                logger.info("[ChatAgent] ══════════════════════════════════════════")
+                return
+
             prompt_input = self._build_prompt_input(
                 context,
                 trigger_type="user",
@@ -657,6 +663,155 @@ class ChatAgentHandler(HandlerBase, ABC):
         finally:
             if acquired:
                 context._generate_lock.release()
+
+    # ── 音乐工具兜底 ──
+
+    @staticmethod
+    def _build_direct_music_tool_call(text: str) -> Optional[dict]:
+        """Detect explicit music commands before LLM tool choice."""
+        compact = re.sub(r"\s+", "", (text or "").strip())
+        if not compact:
+            return None
+
+        stop_words = ("停止播放", "退出播放", "关闭音乐", "停止音乐", "不听了")
+        if any(word in compact for word in stop_words):
+            return {"name": "music_control", "args": {"action": "stop"}}
+
+        if any(word in compact for word in ("暂停播放", "暂停音乐")):
+            return {"name": "music_control", "args": {"action": "pause"}}
+        if any(word in compact for word in ("继续播放", "恢复播放", "继续音乐")):
+            return {"name": "music_control", "args": {"action": "resume"}}
+        if "下一首" in compact:
+            return {"name": "music_control", "args": {"action": "next"}}
+
+        if "放假" in compact:
+            return None
+
+        match = re.search(
+            r"^(?:给我|帮我|请你|请|麻烦你)?"
+            r"(?:播放|放一下|放一首|放一个|放首|放个|点播|来一首|听一下|想听|放)"
+            r"(?P<query>.+)$",
+            compact,
+        )
+        if not match:
+            return None
+
+        query = match.group("query")
+        query = re.sub(r"^(?:一首|一个|首|个)", "", query)
+        query = re.sub(r"(?:相关)?(?:经典歌曲|经典曲目|歌曲|音乐|曲子|的歌)$", "", query)
+        query = query.strip("，。！？!?,.~～、 ")
+        if not query or query in {"歌", "歌曲", "音乐"}:
+            return None
+
+        return {
+            "name": "music_request",
+            "args": {
+                "song_name": query,
+                "limit": 5,
+            },
+        }
+
+    def _handle_direct_music_command(
+        self,
+        context: ChatAgentContext,
+        text: str,
+        output_definitions: Dict[ChatDataType, HandlerDataInfo],
+    ) -> bool:
+        tool_call = self._build_direct_music_tool_call(text)
+        registry = context.tool_registry
+        if (
+            not tool_call
+            or registry is None
+            or not context.config.tool_use.enabled
+            or registry.get(tool_call["name"]) is None
+        ):
+            return False
+
+        output_definition = output_definitions.get(ChatDataType.AVATAR_TEXT).definition
+        streamer = context.data_submitter.get_streamer(ChatDataType.AVATAR_TEXT)
+        stream_key = (
+            streamer.current_stream.identity.stream_key_str
+            if streamer.current_stream is not None
+            else None
+        )
+        if stream_key is None:
+            stream = streamer.new_stream(
+                sources=[],
+                config=ChatStreamConfig(cancelable=True),
+            )
+            stream_key = stream.stream_key_str
+
+        if stream_key:
+            context.active_stream_keys.add(stream_key)
+
+        try:
+            result = registry.execute(tool_call["name"], tool_call["args"])
+            client_action = self._build_client_action_from_tool_result(
+                tool_call["name"],
+                result,
+            )
+            if client_action:
+                self._stream_client_action(output_definition, streamer, client_action)
+                logger.info(
+                    f"[ChatAgent] Direct music client_action dispatch: "
+                    f"type={client_action.get('type')} tool={tool_call['name']} "
+                    f"stream_key={stream_key}"
+                )
+
+            reply = self._build_direct_music_reply(
+                tool_call["name"],
+                result,
+                client_action,
+            )
+            output = DataBundle(output_definition)
+            output.set_main_data(reply)
+            streamer.stream_data(output)
+            logger.info(f"[ChatAgent] Direct music reply: '{reply}'")
+
+            if context.memory:
+                context.memory.record_assistant_response(reply)
+                self._check_compact(context)
+
+            return True
+        finally:
+            if stream_key:
+                context.active_stream_keys.discard(stream_key)
+            end_output = DataBundle(output_definition)
+            end_output.set_main_data("")
+            streamer.stream_data(end_output, finish_stream=True)
+            context.is_generating = False
+            context.last_interaction_time = time.time()
+
+    @staticmethod
+    def _build_direct_music_reply(
+        tool_name: str,
+        result: ToolResult,
+        client_action: Optional[dict],
+    ) -> str:
+        if not result.success:
+            return f"音乐操作失败：{result.error or '暂时不可用'}"
+
+        if tool_name == "music_request":
+            selected = result.data.get("selected") or {}
+            title = selected.get("title") or selected.get("name") or result.data.get("query") or "这首歌"
+            artist = selected.get("artist") or ""
+            if client_action:
+                return f"正在播放《{title}》" + (f" - {artist}" if artist else "") + "。"
+            return f"找到了《{title}》，但暂时没有拿到可播放链接。"
+
+        if tool_name == "music_control":
+            action = (result.data or {}).get("action")
+            replies = {
+                "stop": "好的，音乐已经停止播放啦～",
+                "pause": "好的，音乐已暂停。",
+                "resume": "好的，继续播放音乐。",
+                "next": "好的，切到下一首。",
+                "mute": "好的，音乐已静音。",
+                "unmute": "好的，已取消静音。",
+            }
+            return replies.get(action, "好的，音乐控制已执行。")
+
+        return "好的，音乐操作已执行。"
 
     # ── 构建 PromptInput ──
 
@@ -792,6 +947,70 @@ class ChatAgentHandler(HandlerBase, ABC):
         extra["enable_thinking"] = context.config.enable_thinking
         kwargs["extra_body"] = extra
 
+    @staticmethod
+    def _build_client_action_from_tool_result(
+        tool_name: str,
+        result: ToolResult,
+    ) -> Optional[dict]:
+        if not result.success or not isinstance(result.data, dict):
+            return None
+
+        if tool_name == "music_request":
+            play_url = result.data.get("play_url") or ""
+            if not play_url:
+                return None
+
+            selected = result.data.get("selected") or {}
+            title = (
+                selected.get("title")
+                or selected.get("name")
+                or result.data.get("query")
+                or ""
+            )
+            artist = selected.get("artist") or ""
+            if not artist:
+                artists = selected.get("artists")
+                if isinstance(artists, list):
+                    artist = " / ".join(str(item) for item in artists if item)
+
+            return {
+                "type": "music.play",
+                "title": title,
+                "artist": artist,
+                "url": play_url,
+                "source": result.data.get("source") or "",
+                "query": result.data.get("query") or "",
+                "candidates": result.data.get("candidates") or [],
+                "hints": ["暂停", "继续", "下一首", "音量小一点"],
+            }
+
+        if tool_name == "music_control":
+            action = result.data.get("action")
+            if not action:
+                return None
+            client_action = {
+                "type": "music.control",
+                "action": action,
+                "hints": result.data.get("hints")
+                or ["暂停", "继续", "下一首", "音量小一点"],
+            }
+            if "delta" in result.data:
+                client_action["delta"] = result.data.get("delta")
+            return client_action
+
+        return None
+
+    @staticmethod
+    def _stream_client_action(
+        output_definition,
+        streamer,
+        client_action: dict,
+    ) -> None:
+        output = DataBundle(output_definition)
+        output.set_main_data("")
+        output.add_meta("client_action", client_action)
+        streamer.stream_data(output)
+
     def _agent_loop(
         self,
         context: ChatAgentContext,
@@ -882,6 +1101,21 @@ class ChatAgentHandler(HandlerBase, ABC):
                     "tool_call_id": tc["id"],
                     "content": result.to_content_str(),
                 })
+                client_action = self._build_client_action_from_tool_result(
+                    tc["name"],
+                    result,
+                )
+                if client_action:
+                    self._stream_client_action(
+                        output_definition,
+                        streamer,
+                        client_action,
+                    )
+                    logger.info(
+                        f"[ChatAgent] Music client_action dispatch: "
+                        f"type={client_action.get('type')} tool={tc['name']} "
+                        f"stream_key={stream_key}"
+                    )
                 logger.info(
                     f"[ChatAgent]   tool={tc['name']} → "
                     f"{result.to_content_str()[:120]}"

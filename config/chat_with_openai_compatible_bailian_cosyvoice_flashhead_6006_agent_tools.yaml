@@ -1,0 +1,177 @@
+default:
+  logger:
+    log_level: INFO
+  service:
+    host: 0.0.0.0
+    port: 6006
+    cert_file: ssl_certs/localhost.crt
+    cert_key: ssl_certs/localhost.key
+  history:
+    retention_mode: by_both
+    max_events: 1000
+    max_age_seconds: 3600
+    cleanup_interval_seconds: 30
+  chat_engine:
+    model_root: models
+    concurrent_limit: 1
+    handler_search_path:
+    - src/handlers
+    handler_configs:
+      RtcClient:
+        module: client/rtc_client/client_handler_rtc
+        connection_ttl: 900
+        output_video_fps: 25
+        input_video_enabled: true
+        turn_config:
+          turn_provider: turn_server
+          urls:
+          - stun:stun.l.google.com:19302
+          - turn:115.159.81.115:3478?transport=udp
+          - turn:115.159.81.115:3478?transport=tcp
+          username: turnuser
+          credential: Abc_2026_Turn_x9Kp7
+      InterruptHandler:
+        module: logic/interrupt/interrupt_handler
+      SileroVad:
+        module: vad/silerovad/duplex_vad_handler
+        speaking_threshold: 0.25
+        start_delay: 1024
+        end_delay: 32000
+        early_end_delay: 5000
+        early_end_repeat_delay: 1000
+        buffer_look_back: 2048
+        speech_padding: 512
+        volume_threshold: -50
+        post_end_monitor_samples: 8000
+        reconnect_threshold_samples: 0
+        post_end_energy_threshold: -5
+      SenseVoice:
+        enabled: true
+        module: asr/sensevoice/asr_handler_sensevoice
+        model_name: iic/SenseVoiceSmall
+        input_type_override:
+          HUMAN_AUDIO: HUMAN_DUPLEX_AUDIO
+        output_type_override:
+          HUMAN_TEXT: HUMAN_DUPLEX_TEXT
+      SmartTurnEOU:
+        enabled: true
+        module: vad/smart_turn_eou/eou_handler_smart_turn
+        threshold: 0.8
+        max_buffer_seconds: 300.0
+        sample_rate: 16000
+        model_path: models/smart_turn/smart-turn-v3.1-cpu.onnx
+        input_type_override:
+          HUMAN_AUDIO: HUMAN_DUPLEX_AUDIO
+      SemanticTurnDetector:
+        enabled: true
+        module: llm/semantic_turn_detector/semantic_turn_detector_handler
+        duplex_mode: true
+        api_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+        model_name: qwen-plus
+        enable_interrupt_detection: true
+        interrupt_on_any_speech: false
+        interrupt_on_speech_start: false
+        min_text_length_for_interrupt: 2
+        enable_completion_detection: false
+        min_text_length_for_completion: 1
+        interrupt_judge_api_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+        interrupt_judge_model_name: qwen-plus
+        request_timeout: 3.0
+        max_context_turns: 3
+      CosyVoice:
+        enabled: true
+        module: tts/bailian_tts/tts_handler_cosyvoice_bailian
+        voice: longanhuan_v3
+        model_name: cosyvoice-v3-flash
+        instruction: 请用四川话表达。
+      LLMOpenAICompatible:
+        enabled: false
+        module: llm/openai_compatible/llm_handler_openai_compatible
+        model_name: qwen-plus
+        enable_video_input: false
+        history_length: 20
+        system_prompt: 请你扮演一个 AI 助手，用简短的两三句对话来回答用户的问题，并在对话内容中加入合适的标点符号，不需要讨论标点符号相关的内容
+        api_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+        web_search_mode: bocha
+        web_search_always: true
+        web_search_timeout: 3.0
+        web_search_result_limit: 5
+      ChatAgent:
+        enabled: true
+        module: agent/chat_agent_handler
+        llm_model: qwen-plus
+        api_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+        stable_core: |
+          你是一个实时数字人助手，正在通过语音和用户自然对话。
+
+          ## 输出约束
+          - 用口语化的自然语言回答，语气亲切。
+          - 保持简短，通常 2-3 句，除非用户明确要求详细说明。
+          - 不要输出 Markdown、代码块或列表符号。
+          - 不要原样复述工具返回的 JSON，要把结果自然地说给用户。
+
+          ## 工具使用
+          你可以在合适时机调用工具：
+          - 用户询问当前时间、日期、星期几时，使用 get_current_time。
+          - 用户询问运行环境、系统信息时，使用 get_system_info。
+          - 用户询问最新信息、新闻、价格、政策、事实核验、联网资料时，使用 web_search。
+          - 用户询问天气、温度、下雨、刮风、出门穿衣建议时，使用 get_weather。
+          - 用户想听歌、点歌、播放音乐、找歌曲链接时，直接使用 music_request，不要先二次确认。
+          - music_request 成功后，前端会自动播放；只需简短说“正在播放某首歌”，不要让用户点击链接。
+          - 用户说停止播放、退出播放、关闭音乐、不听了、暂停、继续、下一首、音量小一点、音量大一点、静音或取消静音时，使用 music_control；其中停止/退出/关闭/不听了对应 action=stop。
+          - 如果工具失败，简短说明失败原因，并给出下一步建议。
+
+          ## 结构化标签说明
+          你可能会收到 <dialogue-summary> 或 <background-results> 等结构化内容。把它们当作上下文使用，不要向用户复述标签本身。
+        persona_snapshot: |
+          性格：友善亲切，像朋友一样交流。
+          口吻：轻松自然，回答简洁，但在用户需要时可以认真展开。
+        persona_max_chars: 2500
+        perception_max_chars: 800
+        perception_max_entries: 100
+        perception_decay_rate: 0.1
+        max_dialogue_turns: 20
+        context_compact:
+          enabled: true
+          compact_threshold: 15
+          keep_recent: 5
+          save_transcript: true
+          rehydrate_task_brief: true
+          rehydrate_env_state: true
+        tool_use:
+          enabled: true
+          max_tool_rounds: 5
+          register_demo_tools: true
+          strict_schema: false
+          tool_modules:
+          - handlers.agent.tools.demo_tools
+          - handlers.agent.tools.web_search
+          - handlers.agent.tools.music_request
+          - handlers.agent.tools.music_control
+          - handlers.agent.tools.weather
+        oc_bridge:
+          enabled: false
+        proactive:
+          enabled: false
+          idle_trigger:
+            enabled: false
+            idle_seconds: 60.0
+            hint: 用户已经安静了一会儿，可以适当关心一下或轻松地聊点什么。
+            mode_overrides: {}
+          pending_confirmation_trigger:
+            enabled: false
+            idle_seconds: 15.0
+            cooldown: 30.0
+            hint: 有待确认的审批请求。
+        enable_thinking: false
+      FlashHead:
+        module: avatar/flashhead/avatar_handler_flashhead
+        ckpt_dir: models/SoulX-FlashHead-1_3B
+        wav2vec_dir: models/wav2vec2-base-960h
+        model_type: lite
+        cond_image_path: resource/avatar/flashhead/girl.png
+        fps: 25
+        base_seed: 42
+        use_face_crop: false
+        debug: false
+        idle_noise_amplitude: 0.003
