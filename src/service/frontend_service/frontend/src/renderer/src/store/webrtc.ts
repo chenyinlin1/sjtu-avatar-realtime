@@ -1,5 +1,6 @@
 import { WS } from '@/helpers/ws'
-import { SignalBody, TextPayload, WsEventTypes, WsProtocol } from '@/interface/eventType'
+import type { DeviceInfoPayload, SignalBody, TextPayload } from '@/interface/eventType'
+import { WsEventTypes, WsProtocol } from '@/interface/eventType'
 import { StreamState } from '@/interface/voiceChat'
 import { AvatarHandler } from '@renderer/handlers/avatarHandler'
 import { setupWebRTC, stop } from '@/utils/webrtcUtils'
@@ -63,6 +64,7 @@ export const useVideoChatStore = defineStore('videoChatStore', {
             this.webRTCId = webRTCId as string
             this.chatDataChannel = dataChannel as RTCDataChannel
             this.initChatDataChannel()
+            this.sendDeviceInfo()
 
             if (appStore.avatarType === 'lam') {
               if (appStore.wsSessionRoute) {
@@ -97,6 +99,29 @@ export const useVideoChatStore = defineStore('videoChatStore', {
           chatStore.setActiveRenderer(null)
           this.gsLoadPercent = 0
         }
+      }
+    },
+
+    sendDeviceInfo() {
+      const appStore = useAppStore()
+      const payload = appStore.currentDeviceInfoPayload() as DeviceInfoPayload | null
+      if (!payload || !this.chatDataChannel) return
+      const send = (): void => {
+        if (!this.chatDataChannel || this.chatDataChannel.readyState !== 'open') return
+        this.chatDataChannel.send(
+          JSON.stringify({
+            header: {
+              name: WsProtocol.DeviceInfo,
+              request_id: nanoid(),
+            },
+            payload,
+          })
+        )
+      }
+      if (this.chatDataChannel.readyState === 'open') {
+        send()
+      } else {
+        this.chatDataChannel.addEventListener('open', send, { once: true })
       }
     },
     sendText(text: string) {
@@ -162,6 +187,11 @@ export const useVideoChatStore = defineStore('videoChatStore', {
           if (consumedClientAction && !payload.text) return
           const role = headerName === WsProtocol.EchoAvatarText ? 'avatar' : 'human'
           chatStore.updateChatRecords({ ...payload, role }, role)
+        } else if (headerName === WsProtocol.DeviceInfoAck) {
+          console.info('[persona] DeviceInfoAck', data.payload)
+        } else if (headerName === WsProtocol.Error) {
+          const payload = (data.payload || {}) as { message?: string }
+          if (payload.message) message.warning(payload.message)
         } else if (
           headerName === WsProtocol.InterruptNotification ||
           headerName === WsProtocol.EndSpeech

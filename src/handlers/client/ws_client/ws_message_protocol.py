@@ -169,7 +169,11 @@ class EchoTextPayload(BaseModel):
     end_of_speech: bool = Field(..., description="是否结束")
     metadata: Optional[Dict[str, Any]] = Field(
         default=None,
-        description="附加元数据，包含 handler 添加的自定义信息（如 task_id）"
+        description=(
+            "附加元数据，包含 handler 添加的自定义信息。"
+            "音箱端需要识别 metadata.client_action，"
+            "例如 {'type': 'music.play', 'url': 'https://...'}，并在端侧执行播放/控制。"
+        )
     )
 
 

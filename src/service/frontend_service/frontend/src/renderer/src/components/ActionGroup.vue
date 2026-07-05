@@ -65,7 +65,7 @@
             :key="device.deviceId"
             class="selector"
             @click.stop="
-              (e) => {
+              () => {
                 handleDeviceChange(device.deviceId)
                 micListShow = false
               }
@@ -83,10 +83,55 @@
       </div>
     </div>
 
+
+    <div v-if="webPersonaEnabled">
+      <div
+        v-click-outside="() => (personaListShow = false)"
+        :class="['action', 'persona-action', { 'menu-open': personaListShow, disabled: !canChangePersona }]"
+        :title="selectedPersonaLabel ? `当前角色：${selectedPersonaLabel}` : '选择角色'"
+        @click="togglePersonaList"
+      >
+        <UserOutlined />
+        <div
+          v-if="streamState === 'closed'"
+          class="corner"
+          @click.stop.prevent="() => (personaListShow = !personaListShow)"
+        >
+          <div class="corner-inner" />
+        </div>
+        <div
+          v-show="personaListShow && streamState === 'closed'"
+          class="selectors persona-selectors"
+          :class="{ left: isLandscape }"
+        >
+          <div v-if="!webPersonaItems.length" class="selector persona-empty-selector">
+            暂无角色
+          </div>
+          <div
+            v-for="persona in webPersonaItems"
+            :key="persona.persona_id"
+            class="selector"
+            @click.stop="handlePersonaSelect(persona.persona_id)"
+          >
+            {{ persona.display_name || persona.persona_id }}
+            <div v-if="persona.persona_id === selectedPersonaId" class="active-icon">
+              <CheckIcon />
+            </div>
+          </div>
+          <div class="selector persona-create-selector" @click.stop="openCreatePersona">
+            <PlusOutlined />
+            <span>新建角色</span>
+          </div>
+        </div>
+      </div>
+    </div>
     <AvatarCloneControl
       v-if="avatarCloneEnabled"
       :stream-state="streamState"
       :upload-route="avatarCloneUploadRoute"
+      :persona-id="selectedPersonaId"
+      :persona-label="selectedPersonaLabel"
+      @updated="refreshPersonas"
     />
     <VoiceCloneControl
       v-if="voiceCloneEnabled"
@@ -94,6 +139,9 @@
       :upload-route="voiceCloneUploadRoute"
       :reset-route="voiceCloneResetRoute"
       :sample-text="voiceCloneSampleText"
+      :persona-id="selectedPersonaId"
+      :persona-label="selectedPersonaLabel"
+      @updated="refreshPersonas"
     />
     <div
       :class="['action', 'interrupt-action', { active: canInterrupt, disabled: !canInterrupt }]"
@@ -114,8 +162,46 @@
       </div>
     </div>
   </div>
+
+  <Teleport to="body">
+    <div v-if="createPersonaOpen" class="persona-dialog-overlay" @click.self="closeCreatePersona">
+      <section class="persona-dialog-panel">
+        <header class="persona-dialog-header">
+          <div>
+            <div class="persona-dialog-title">新建角色</div>
+          </div>
+          <button class="persona-icon-button" type="button" title="关闭" @click="closeCreatePersona">
+            <CloseOutlined />
+          </button>
+        </header>
+        <label class="persona-field">
+          <span>角色名称</span>
+          <input
+            v-model="newPersonaName"
+            type="text"
+            maxlength="24"
+            placeholder="例如：小明"
+            @keyup.enter="submitCreatePersona"
+          />
+        </label>
+        <footer class="persona-dialog-footer">
+          <button class="persona-secondary-button" type="button" @click="closeCreatePersona">取消</button>
+          <button
+            class="persona-primary-button"
+            type="button"
+            :disabled="creatingPersona || !newPersonaName.trim()"
+            @click="submitCreatePersona"
+          >
+            创建
+          </button>
+        </footer>
+      </section>
+    </div>
+  </Teleport>
 </template>
 <script setup lang="ts">
+import { CloseOutlined, PlusOutlined, UserOutlined } from '@ant-design/icons-vue'
+import { message } from 'ant-design-vue'
 import { computed, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 
@@ -166,6 +252,10 @@ const {
   voiceCloneUploadRoute,
   voiceCloneResetRoute,
   voiceCloneSampleText,
+  webPersonaEnabled,
+  webPersonaItems,
+  selectedPersonaId,
+  selectedPersona,
 } = storeToRefs(appStore)
 const streamState = computed(() =>
   appStore.chatMode === 'ws' ? wsChatStore.streamState : videoChatStore.streamState
@@ -178,6 +268,61 @@ const { handleCameraOff, handleMicMuted, handleDeviceChange } = mediaStore
 const { wrapperRect, isLandscape } = storeToRefs(visionStore)
 const micListShow = ref(false)
 const cameraListShow = ref(false)
+const personaListShow = ref(false)
+const createPersonaOpen = ref(false)
+const newPersonaName = ref('')
+const creatingPersona = ref(false)
+const selectedPersonaLabel = computed(
+  () => selectedPersona.value?.display_name || selectedPersonaId.value || ''
+)
+const canChangePersona = computed(() => streamState.value === 'closed')
+
+function togglePersonaList(): void {
+  if (!canChangePersona.value) {
+    message.warning('请先停止当前对话后再切换角色')
+    return
+  }
+  personaListShow.value = !personaListShow.value
+}
+
+function handlePersonaSelect(personaId: string): void {
+  appStore.selectWebPersona(personaId)
+  personaListShow.value = false
+}
+
+function openCreatePersona(): void {
+  if (!canChangePersona.value) return
+  personaListShow.value = false
+  newPersonaName.value = ''
+  createPersonaOpen.value = true
+}
+
+function closeCreatePersona(): void {
+  if (creatingPersona.value) return
+  createPersonaOpen.value = false
+}
+
+async function submitCreatePersona(): Promise<void> {
+  if (!newPersonaName.value.trim()) return
+  creatingPersona.value = true
+  try {
+    await appStore.createWebPersona(newPersonaName.value)
+    message.success('角色已创建')
+    createPersonaOpen.value = false
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : String(error))
+  } finally {
+    creatingPersona.value = false
+  }
+}
+
+async function refreshPersonas(): Promise<void> {
+  if (!webPersonaEnabled.value) return
+  await appStore.refreshWebPersonas().catch((error) => {
+    message.error(error instanceof Error ? error.message : String(error))
+  })
+}
+
 
 function handleInterrupt(): void {
   if (!canInterrupt.value) return
@@ -295,6 +440,28 @@ function handleInterrupt(): void {
     background: #67666a;
   }
 
+
+  .persona-action.disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+  }
+
+  .persona-empty-selector {
+    cursor: default !important;
+    opacity: 0.72;
+  }
+
+  .persona-empty-selector:hover {
+    background: transparent !important;
+  }
+
+  .persona-create-selector {
+    display: flex !important;
+    align-items: center;
+    gap: 8px;
+    border-top: 1px solid rgba(255, 255, 255, 0.16);
+  }
+
   .interrupt-action {
     opacity: 0.46;
 
@@ -319,5 +486,90 @@ function handleInterrupt(): void {
 
 .action-group + .action-group {
   margin-top: 10px;
+}
+
+.persona-dialog-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(10, 14, 22, 0.56);
+  backdrop-filter: blur(6px);
+}
+
+.persona-dialog-panel {
+  width: min(360px, calc(100vw - 32px));
+  padding: 16px;
+  border-radius: 8px;
+  background: #111827;
+  color: #f8fafc;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.34);
+}
+
+.persona-dialog-header,
+.persona-dialog-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.persona-dialog-title {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.persona-icon-button,
+.persona-secondary-button,
+.persona-primary-button {
+  height: 34px;
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.persona-icon-button {
+  width: 34px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+.persona-field {
+  display: grid;
+  gap: 8px;
+  margin: 16px 0;
+  font-size: 13px;
+  color: #cbd5e1;
+}
+
+.persona-field input {
+  width: 100%;
+  height: 38px;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  border-radius: 8px;
+  padding: 0 12px;
+  background: #0f172a;
+  color: #fff;
+  outline: none;
+}
+
+.persona-secondary-button {
+  padding: 0 14px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+.persona-primary-button {
+  padding: 0 16px;
+  background: #3b82f6;
+  color: #fff;
+}
+
+.persona-primary-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
 }
 </style>

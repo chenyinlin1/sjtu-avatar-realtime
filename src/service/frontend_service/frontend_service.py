@@ -17,6 +17,7 @@ from starlette.responses import Response
 from loguru import logger
 
 from src.engine_utils.directory_info import DirectoryInfo
+from service.frontend_service.web_persona_routes import register_web_persona_routes
 
 InitConfigSource = Union[Dict[str, Any], Callable[[], Dict[str, Any]]]
 
@@ -104,6 +105,7 @@ def register_frontend(
 
     opts = options or FrontendRegistrationOptions()
     frontend_path = _resolve_frontend_path(opts)
+    register_web_persona_routes(app)
 
     @app.get(opts.init_config_route)
     async def init_config_endpoint():

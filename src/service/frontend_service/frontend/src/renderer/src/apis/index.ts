@@ -15,27 +15,57 @@ export function webrtcOffer(body: Record<string, unknown>): Promise<Response> {
   })
 }
 
-export function uploadFlashHeadAvatar(uploadRoute: string, file: File): Promise<Response> {
+function fillPersonaRoute(route: string, personaId?: string): string {
+  if (!route.includes('{persona_id}')) return route
+  if (!personaId) throw new Error('请先选择要克隆的角色')
+  return route.replace('{persona_id}', encodeURIComponent(personaId))
+}
+
+export function uploadFlashHeadAvatar(
+  uploadRoute: string,
+  file: File,
+  personaId?: string
+): Promise<Response> {
   const formData = new FormData()
   formData.append('file', file)
-  return fetch(uploadRoute, {
+  return fetch(fillPersonaRoute(uploadRoute, personaId), {
     method: 'POST',
     body: formData,
   })
 }
 
-export function uploadVoiceClone(uploadRoute: string, file: File): Promise<Response> {
+export function uploadVoiceClone(
+  uploadRoute: string,
+  file: File,
+  options: { personaId?: string; refText?: string; sourceDurationMs?: number } = {}
+): Promise<Response> {
   const formData = new FormData()
   formData.append('file', file)
-  return fetch(uploadRoute, {
+  if (options.refText) formData.append('ref_text', options.refText)
+  if (typeof options.sourceDurationMs === 'number') {
+    formData.append('source_duration_ms', String(options.sourceDurationMs))
+  }
+  return fetch(fillPersonaRoute(uploadRoute, options.personaId), {
     method: 'POST',
     body: formData,
   })
 }
 
-export function resetVoiceClone(resetRoute: string): Promise<Response> {
-  return fetch(resetRoute, {
+export function resetVoiceClone(resetRoute: string, personaId?: string): Promise<Response> {
+  return fetch(fillPersonaRoute(resetRoute, personaId), {
     method: 'POST',
+  })
+}
+
+export function listWebPersonas(listRoute: string): Promise<Response> {
+  return fetch(listRoute)
+}
+
+export function createWebPersona(createRoute: string, body: Record<string, unknown>): Promise<Response> {
+  return fetch(createRoute, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
   })
 }
 

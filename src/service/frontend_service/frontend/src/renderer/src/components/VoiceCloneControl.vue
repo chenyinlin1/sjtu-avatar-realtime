@@ -17,7 +17,7 @@
         <header class="voice-dialog-header">
           <div>
             <div class="voice-title">音色克隆</div>
-            <div class="voice-subtitle">读完文案后试听确认</div>
+            <div class="voice-subtitle">{{ personaLabel ? `为 ${personaLabel} 更新音色` : '读完文案后试听确认' }}</div>
           </div>
           <button class="icon-button" type="button" title="关闭" @click="closeDialog">
             <CloseOutlined />
@@ -120,6 +120,12 @@ const props = defineProps<{
   uploadRoute: string
   resetRoute: string
   sampleText: string
+  personaId?: string
+  personaLabel?: string
+}>()
+
+const emit = defineEmits<{
+  (event: 'updated'): void
 }>()
 
 const mediaStore = useMediaStore()
@@ -136,7 +142,11 @@ let chunks: BlobPart[] = []
 let timer: number | undefined
 
 const canOpenClone = computed(
-  () => props.streamState === StreamState.closed && Boolean(props.uploadRoute) && !cloning.value
+  () =>
+    props.streamState === StreamState.closed &&
+    Boolean(props.uploadRoute) &&
+    (!props.uploadRoute.includes('{persona_id}') || Boolean(props.personaId)) &&
+    !cloning.value
 )
 const normalizedSampleText = computed(() => props.sampleText || DEFAULT_SAMPLE_TEXT)
 const canSubmit = computed(
@@ -262,12 +272,17 @@ async function submitVoiceClone(): Promise<void> {
 
   cloning.value = true
   try {
-    const response = await uploadVoiceClone(props.uploadRoute, audioFile.value)
+    const response = await uploadVoiceClone(props.uploadRoute, audioFile.value, {
+      personaId: props.personaId,
+      refText: normalizedSampleText.value,
+      sourceDurationMs: seconds.value * 1000,
+    })
     const payload = await response.json().catch(() => ({}))
     if (!response.ok) {
       throw new Error(payload.detail || '音色克隆失败')
     }
     message.success('音色已更新，请开始对话')
+    emit('updated')
     closeDialog()
   } catch (error) {
     message.error(error instanceof Error ? error.message : String(error))
@@ -280,13 +295,14 @@ async function resetDefaultVoice(): Promise<void> {
   if (!props.resetRoute) return
   cloning.value = true
   try {
-    const response = await resetVoiceClone(props.resetRoute)
+    const response = await resetVoiceClone(props.resetRoute, props.personaId)
     const payload = await response.json().catch(() => ({}))
     if (!response.ok) {
       throw new Error(payload.detail || '恢复默认音色失败')
     }
     clearRecording()
     message.success('已恢复默认音色')
+    emit('updated')
     closeDialog()
   } catch (error) {
     message.error(error instanceof Error ? error.message : String(error))

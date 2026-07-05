@@ -60,6 +60,23 @@ def test_local_time_context_is_injected_for_current_time_questions():
     assert handler._build_local_time_context(context, "你好，介绍一下你自己") is None
 
 
+def test_bocha_search_skips_local_time_questions_even_when_forced(monkeypatch):
+    context = LLMContext("test-session")
+    context.web_search_always = True
+    context.bocha_api_key = "fake-key"
+    handler = HandlerLLM()
+
+    def fail_search(*_args, **_kwargs):
+        raise AssertionError("search_bocha should not be called for local time questions")
+
+    monkeypatch.setattr(
+        "llm.openai_compatible.llm_handler_openai_compatible.search_bocha",
+        fail_search,
+    )
+
+    assert handler._build_bocha_search_context(context, "现在几点了") == ""
+
+
 def test_music_control_stop_recognizes_natural_stop_phrases():
     handler = HandlerLLM()
 

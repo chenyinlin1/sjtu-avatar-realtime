@@ -14,7 +14,7 @@
         <header class="clone-dialog-header">
           <div>
             <div class="clone-title">数字人克隆</div>
-            <div class="clone-subtitle">对齐轮廓后确认照片</div>
+            <div class="clone-subtitle">{{ personaLabel ? `为 ${personaLabel} 更新形象` : '对齐轮廓后确认照片' }}</div>
           </div>
           <button class="icon-button" type="button" title="关闭" @click="closeCloneDialog">
             <CloseOutlined />
@@ -125,6 +125,12 @@ type CloneMode = 'camera' | 'upload'
 const props = defineProps<{
   streamState: StreamState
   uploadRoute: string
+  personaId?: string
+  personaLabel?: string
+}>()
+
+const emit = defineEmits<{
+  (event: 'updated'): void
 }>()
 
 const mediaStore = useMediaStore()
@@ -138,7 +144,11 @@ const previewImageUrl = ref('')
 const selectedFile = ref<File | null>(null)
 
 const canOpenClone = computed(
-  () => props.streamState === StreamState.closed && Boolean(props.uploadRoute) && !uploading.value
+  () =>
+    props.streamState === StreamState.closed &&
+    Boolean(props.uploadRoute) &&
+    (!props.uploadRoute.includes('{persona_id}') || Boolean(props.personaId)) &&
+    !uploading.value
 )
 
 async function openCloneDialog(): Promise<void> {
@@ -264,12 +274,13 @@ async function confirmUpload(): Promise<void> {
 async function uploadAvatarFile(file: File): Promise<void> {
   uploading.value = true
   try {
-    const response = await uploadFlashHeadAvatar(props.uploadRoute, file)
+    const response = await uploadFlashHeadAvatar(props.uploadRoute, file, props.personaId)
     const payload = await response.json().catch(() => ({}))
     if (!response.ok) {
       throw new Error(payload.detail || '数字人克隆失败')
     }
     message.success('数字人形象已更新，请开始对话')
+    emit('updated')
     closeCloneDialog()
   } catch (error) {
     message.error(error instanceof Error ? error.message : String(error))

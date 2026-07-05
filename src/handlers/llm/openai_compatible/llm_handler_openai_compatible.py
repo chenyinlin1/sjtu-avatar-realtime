@@ -821,6 +821,8 @@ class HandlerLLM(HandlerBase, ABC):
         return now, timezone_label
 
     def _build_bocha_search_context(self, context: LLMContext, query: str) -> str:
+        if self._should_inject_local_time(query):
+            return ""
         if not self._should_search(context, query):
             return ""
         if not context.bocha_api_key:

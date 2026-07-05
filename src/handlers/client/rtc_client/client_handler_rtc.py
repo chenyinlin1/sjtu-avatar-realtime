@@ -297,6 +297,7 @@ from service.frontend_service.avatar_image_upload import (
     AvatarImageUploadError,
     save_avatar_image_bytes,
 )
+from service.frontend_service.web_persona_routes import web_persona_frontend_config
 from service.frontend_service.voice_clone_upload import (
     VoiceCloneUploadError,
     create_cosyvoice_voice_clone,
@@ -506,6 +507,10 @@ class ClientHandlerRtc(ClientHandlerBase):
                 "active": status.get("active", False),
                 "model_name": status.get("model_name"),
             }
+        web_persona_config = web_persona_frontend_config()
+        web_persona_config["avatar_clone_enabled"] = self._find_flashhead_handler() is not None
+        web_persona_config["voice_clone_enabled"] = voice_clone_handler is not None
+        config["web_persona"] = web_persona_config
         return config
 
     def _has_active_sessions(self) -> bool:

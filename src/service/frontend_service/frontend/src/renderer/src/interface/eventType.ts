@@ -16,6 +16,8 @@ export enum WsProtocol {
   SendHumanText = 'SendHumanText',
   TriggerHeartbeat = 'TriggerHeartbeat',
   Interrupt = 'Interrupt',
+  DeviceInfo = 'DeviceInfo',
+  DeviceInfoAck = 'DeviceInfoAck',
   EndSpeech = 'EndSpeech',
   AvatarSessionInitialized = 'AvatarSessionInitialized',
   EchoHumanText = 'EchoHumanText',
@@ -103,6 +105,20 @@ export type SendHumanTextPayload = TextPayload
 
 export interface InterruptPayload {
   maxBatchId?: number
+}
+
+
+export interface DeviceInfoPayload {
+  device_sn: string
+  elder_id?: string
+  tenant_id?: string
+  persona_id?: string
+}
+
+export interface DeviceInfoAckPayload {
+  ok: boolean
+  persona_active: boolean
+  persona_id: string | null
 }
 
 export interface EndSpeechPayload {
@@ -227,6 +243,8 @@ export type WsPayloadMap = {
   [WsProtocol.SendHumanText]: SendHumanTextPayload
   [WsProtocol.TriggerHeartbeat]: undefined
   [WsProtocol.Interrupt]: InterruptPayload
+  [WsProtocol.DeviceInfo]: DeviceInfoPayload
+  [WsProtocol.DeviceInfoAck]: DeviceInfoAckPayload
   [WsProtocol.EndSpeech]: EndSpeechPayload
   [WsProtocol.AvatarSessionInitialized]: undefined
   [WsProtocol.EchoHumanText]: EchoHumanTextPayload
@@ -261,6 +279,7 @@ export type WsInboundMessage = WsMessage<
   | WsProtocol.MotionData
   | WsProtocol.Error
   | WsProtocol.InterruptAccepted
+  | WsProtocol.DeviceInfoAck
   | WsProtocol.MotionDataWelcome
   | WsProtocol.InterruptNotification
   | WsProtocol.ChatSignal
@@ -273,6 +292,7 @@ export type WsOutboundMessage = WsMessage<
   | WsProtocol.SendHumanText
   | WsProtocol.TriggerHeartbeat
   | WsProtocol.Interrupt
+  | WsProtocol.DeviceInfo
   | WsProtocol.EndSpeech
 >
 
