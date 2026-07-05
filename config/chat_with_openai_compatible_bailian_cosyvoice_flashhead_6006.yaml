@@ -26,23 +26,24 @@ default:
         turn_config:
           turn_provider: turn_server
           urls:
-            - "stun:stun.l.google.com:19302"
-            - "turn:115.159.81.115:3478?transport=udp"
-            - "turn:115.159.81.115:3478?transport=tcp"
+            - "stun:stun.l.google.com:19302"  # 加上stun服务器，李思江2026.07.05添加
+            - "stun:stun.miwifi.com:3478"  # 加上stun服务器，李思江2026.07.05添加
+            - "turn:118.24.71.91:3478?transport=udp"
+            - "turn:118.24.71.91:3478?transport=tcp"
           username: "turnuser"
-          credential: "Abc_2026_Turn_x9Kp7"
+          credential: "Turn_2026_AutoDL_8xKp72"
       # === 打断处理器 - 接收 INTERRUPT 信号并执行流取消 ===
       InterruptHandler:
         module: logic/interrupt/interrupt_handler
       SileroVad:
         module: vad/silerovad/duplex_vad_handler
-        speaking_threshold: 0.4
-        start_delay: 4096
-        end_delay: 32000
-        early_end_delay: 5000
+        speaking_threshold: 0.55
+        start_delay: 2048
+        end_delay: 8000
+        early_end_delay: 3000
         early_end_repeat_delay: 1000
-        buffer_look_back: 2048
-        speech_padding: 512
+        buffer_look_back: 8192
+        speech_padding: 2048
         volume_threshold: -40
         post_end_monitor_samples: 8000
         reconnect_threshold_samples: 0
@@ -74,12 +75,13 @@ default:
         enabled: true
         module: llm/semantic_turn_detector/semantic_turn_detector_handler
         duplex_mode: true
+        interrupt_on_speech_start: false
         api_url: "https://api.deepseek.com"
         model_name: "deepseek-v4-flash"
         enable_interrupt_detection: true
         interrupt_on_any_speech: false
         min_text_length_for_interrupt: 2
-        enable_completion_detection: false
+        enable_completion_detection: true
         min_text_length_for_completion: 1
         interrupt_judge_api_url: "https://api.deepseek.com"
         interrupt_judge_model_name: "deepseek-v4-flash"
@@ -105,10 +107,10 @@ default:
         scopemem_top_k: 6
         scopemem_memory_max_chars: 1600
         scopemem_extract_batch_size: 8
-        scopemem_clear_on_start: True
+        scopemem_clear_on_start: False  # 李思江2026.07.05关闭
         api_url: "https://api.deepseek.com"
         web_search_mode: "bocha"  # off | dashscope | bocha，可由 start_realtime_human.sh 覆盖
-        web_search_always: true
+        web_search_always: false
         web_search_timeout: 3.0
         web_search_result_limit: 5
         enable_emotional_support_skills: true
