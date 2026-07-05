@@ -38,20 +38,20 @@ default:
       SileroVad:
         module: vad/silerovad/duplex_vad_handler
         speaking_threshold: 0.55
-        start_delay: 2048
+        start_delay: 256  #李思江2026.07.05调整，原为2048，调整为256
         end_delay: 8000
-        early_end_delay: 3000
-        early_end_repeat_delay: 1000
-        buffer_look_back: 8192
-        speech_padding: 2048
+        early_end_delay: 5000    #李思江2026.07.05调整，原为3000，调整为5000
+        early_end_repeat_delay: 1500    #李思江2026.07.05调整，原为150，调整为1500
+        buffer_look_back: 16384   #李思江2026.07.05调整，原为8192，调整为16384
+        speech_padding: 8192   #李思江2026.07.05调整，原为2048，调整为8192
         volume_threshold: -40
-        post_end_monitor_samples: 8000
+        post_end_monitor_samples: 4000     #李思江2026.07.05调整，原为8000，调整为4000
         reconnect_threshold_samples: 0
-        post_end_energy_threshold: -5
+        post_end_energy_threshold: -20   #李思江2026.07.05调整，原为-5，调整为-20
       BailianASR:
         enabled: True
         module: asr/bailian_asr/asr_handler_bailian
-        model_name: "fun-asr-realtime"
+        model_name: "fun-asr-flash-8k-realtime"
         sample_rate: 16000
         format: "pcm"
         semantic_punctuation_enabled: False
@@ -75,13 +75,13 @@ default:
         enabled: true
         module: llm/semantic_turn_detector/semantic_turn_detector_handler
         duplex_mode: true
-        interrupt_on_speech_start: false
+        interrupt_on_speech_start: false       ##王春昂 7/5日17:49修改 原为false
         api_url: "https://api.deepseek.com"
         model_name: "deepseek-v4-flash"
         enable_interrupt_detection: true
         interrupt_on_any_speech: false
         min_text_length_for_interrupt: 2
-        enable_completion_detection: true
+        enable_completion_detection: true      ##王春昂 7/5日17:49修改 原为true
         min_text_length_for_completion: 1
         interrupt_judge_api_url: "https://api.deepseek.com"
         interrupt_judge_model_name: "deepseek-v4-flash"
@@ -91,7 +91,7 @@ default:
         enabled: True
         module: tts/bailian_tts/tts_handler_cosyvoice_bailian
         voice: "longanhuan_v3"
-        model_name: "cosyvoice-v3-flash"
+        model_name: "cosyvoice-v3.5-flash"
         instruction: "请用四川话表达。"
         # api_key: "" # default=os.getenv("DASHSCOPE_API_KEY")
       LLMOpenAICompatible:

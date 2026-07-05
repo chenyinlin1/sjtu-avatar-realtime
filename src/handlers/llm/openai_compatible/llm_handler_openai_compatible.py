@@ -2,6 +2,7 @@
 
 import os
 import re
+from datetime import datetime
 from typing import Dict, Optional, Set, cast
 from loguru import logger
 from urllib.parse import urlsplit
@@ -29,6 +30,11 @@ try:
     from handlers.agent.tools.music_request import MusicRequestTool
 except Exception:
     MusicRequestTool = None
+
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -231,6 +237,7 @@ class LLMConfig(HandlerBaseConfigModel, BaseModel):
     bocha_endpoint: str = Field(default=os.getenv("BOCHA_ENDPOINT", "https://api.bochaai.com/v1/web-search"))
     web_search_timeout: float = Field(default=_env_float("OPENAVATAR_WEB_SEARCH_TIMEOUT", 3.0))
     web_search_result_limit: int = Field(default=_env_int("OPENAVATAR_WEB_SEARCH_RESULT_LIMIT", 5))
+    local_time_timezone: str = Field(default=os.getenv("OPENAVATAR_LOCAL_TIMEZONE", "Asia/Shanghai"))
     enable_scopemem: bool = Field(default=False)
     scopemem_store_path: str = Field(default="runtime/scopemem/memories.jsonl")
     scopemem_user_name: str = Field(default="User")
@@ -275,6 +282,7 @@ class LLMContext(HandlerContext):
         self.bocha_endpoint = None
         self.web_search_timeout = 3.0
         self.web_search_result_limit = 5
+        self.local_time_timezone = "Asia/Shanghai"
         self.scopemem = None
         self.emotional_support = None
         self.music_player_active = False
@@ -348,6 +356,10 @@ class HandlerLLM(HandlerBase, ABC):
         context.web_search_result_limit = _env_int(
             "OPENAVATAR_WEB_SEARCH_RESULT_LIMIT",
             handler_config.web_search_result_limit,
+        )
+        context.local_time_timezone = os.getenv(
+            "OPENAVATAR_LOCAL_TIMEZONE",
+            handler_config.local_time_timezone or "Asia/Shanghai",
         )
         context.emotional_support = EmotionalSupportSkillAdapter(
             enabled=_env_bool(
@@ -530,6 +542,9 @@ class HandlerLLM(HandlerBase, ABC):
                         "role": "user",
                         "content": search_context,
                     })
+            local_time_context = self._build_local_time_context(context, chat_text)
+            if local_time_context:
+                messages.append(local_time_context)
 
             create_kwargs = {"extra_body": DEEPSEEK_DISABLE_THINKING_EXTRA_BODY}
             if context.web_search_mode == "dashscope":
@@ -758,6 +773,52 @@ class HandlerLLM(HandlerBase, ABC):
                 *lines,
             ]),
         }
+
+
+    def _build_local_time_context(self, context: LLMContext, query: str) -> Optional[dict]:
+        if not self._should_inject_local_time(query):
+            return None
+
+        now, timezone_label = self._get_local_now(context)
+        weekday_cn = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+        weekday = weekday_cn[now.weekday()]
+        content = "\n".join([
+            "以下是系统本地当前时间。用户询问当前时间、日期或星期时，必须优先使用这一信息，"
+            "不要使用联网搜索结果或模型记忆猜测。不要向用户提到这是内部注入。",
+            f"本地时区: {timezone_label}",
+            f"当前日期时间: {now.strftime('%Y-%m-%d %H:%M:%S')}",
+            f"当前日期: {now.strftime('%Y年%m月%d日')}",
+            f"星期: {weekday}",
+        ])
+        return {"role": "user", "content": content}
+
+    @staticmethod
+    def _should_inject_local_time(query: str) -> bool:
+        normalized = re.sub(r"\s+", "", query or "")
+        if not normalized:
+            return False
+        patterns = (
+            r"(现在|当前|此刻).{0,6}(几点|时间|日期)",
+            r"(几点|几时|报时|当前时间|现在时间|告诉我时间|看下时间)",
+            r"(今天|明天|昨天|后天|前天).{0,6}(几号|日期|星期几|周几|礼拜几)",
+            r"(今天|现在).{0,4}(是)?(星期|周|礼拜)",
+            r"(今天|现在).{0,4}(几月几号|几号)",
+            r"今天是什么日子",
+        )
+        return any(re.search(pattern, normalized) for pattern in patterns)
+
+    @staticmethod
+    def _get_local_now(context: LLMContext):
+        timezone_name = getattr(context, "local_time_timezone", None) or "Asia/Shanghai"
+        if ZoneInfo is not None and timezone_name:
+            try:
+                return datetime.now(ZoneInfo(timezone_name)), timezone_name
+            except Exception as e:
+                logger.warning(f"Invalid OPENAVATAR_LOCAL_TIMEZONE={timezone_name}: {e}")
+
+        now = datetime.now().astimezone()
+        timezone_label = now.tzname() or "local"
+        return now, timezone_label
 
     def _build_bocha_search_context(self, context: LLMContext, query: str) -> str:
         if not self._should_search(context, query):

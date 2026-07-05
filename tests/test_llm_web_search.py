@@ -47,6 +47,19 @@ def test_bocha_search_can_be_forced_for_every_request():
     assert handler._should_search(context, "你好，介绍一下你自己")
 
 
+def test_local_time_context_is_injected_for_current_time_questions():
+    context = LLMContext("test-session")
+    handler = HandlerLLM()
+
+    time_context = handler._build_local_time_context(context, "现在几点了")
+
+    assert time_context is not None
+    assert time_context["role"] == "user"
+    assert "当前日期时间" in time_context["content"]
+    assert "Asia/Shanghai" in time_context["content"]
+    assert handler._build_local_time_context(context, "你好，介绍一下你自己") is None
+
+
 def test_music_control_stop_recognizes_natural_stop_phrases():
     handler = HandlerLLM()
 
