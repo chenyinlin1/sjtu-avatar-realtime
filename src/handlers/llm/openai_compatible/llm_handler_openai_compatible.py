@@ -312,6 +312,8 @@ class LLMContext(HandlerContext):
         self.pending_tool_calls = []
         self.tool_execution_results = []
         self.pending_tool_result_messages = []
+        self.tool_feedback_messages = []
+        self.tool_feedback_completion_kwargs = None
 
 
 class HandlerLLM(HandlerBase, ABC):
@@ -629,6 +631,12 @@ class HandlerLLM(HandlerBase, ABC):
                     turn_id,
                     chat_text,
                 )
+                self._prepare_tool_feedback_request(
+                    context,
+                    messages,
+                    stream_key,
+                    turn_id,
+                )
             if not cancelled:
                 context.history.add_message(HistoryMessage(role="human", content=chat_text))
                 context.history.add_message(HistoryMessage(role="avatar", content=context.output_texts))
@@ -780,6 +788,8 @@ class HandlerLLM(HandlerBase, ABC):
         context.pending_tool_calls = []
         context.tool_execution_results = []
         context.pending_tool_result_messages = []
+        context.tool_feedback_messages = []
+        context.tool_feedback_completion_kwargs = None
 
     @staticmethod
     def _build_assistant_tool_call_message(full_text: str, tool_calls: List[dict]) -> Optional[dict]:
@@ -830,6 +840,51 @@ class HandlerLLM(HandlerBase, ABC):
         return pending
 
     @staticmethod
+    def _json_tool_content(payload: dict) -> str:
+        return json.dumps(payload, ensure_ascii=False, default=str)
+
+    @staticmethod
+    def _normalize_tool_execution_result(
+        call: dict,
+        *,
+        success: bool,
+        data,
+        error: Optional[str],
+        content: Optional[str],
+    ) -> dict:
+        if not isinstance(data, dict):
+            data = {"value": data} if data is not None else {}
+
+        normalized_success = bool(success)
+        normalized_error = error
+        if content is None or not isinstance(content, str) or not content.strip():
+            if normalized_success:
+                content = HandlerLLM._json_tool_content(data)
+            else:
+                content = HandlerLLM._json_tool_content({"error": normalized_error or "Tool execution failed"})
+        else:
+            try:
+                json.loads(content)
+            except Exception:
+                normalized_success = False
+                normalized_error = normalized_error or "Tool result content is not valid JSON"
+                content = HandlerLLM._json_tool_content({
+                    "error": normalized_error,
+                    "raw_content": content,
+                })
+
+        return {
+            "tool_call_id": call.get("id", ""),
+            "name": call.get("name", ""),
+            "arguments": call.get("arguments", ""),
+            "parsed_args": call.get("parsed_args") if isinstance(call.get("parsed_args"), dict) else None,
+            "success": normalized_success,
+            "data": data,
+            "error": normalized_error,
+            "content": content,
+        }
+
+    @staticmethod
     def _execute_pending_tool_calls(context: LLMContext) -> List[dict]:
         registry = getattr(context, "tool_registry", None)
         results = []
@@ -851,42 +906,113 @@ class HandlerLLM(HandlerBase, ABC):
                 tool_result = registry.execute(name, parsed_args)
 
             if tool_result is None:
-                success = False
-                data = {}
-                content = json.dumps({"error": error or "Tool execution failed"}, ensure_ascii=False)
-            else:
-                success = bool(getattr(tool_result, "success", False))
-                data = getattr(tool_result, "data", {}) or {}
-                error = getattr(tool_result, "error", None)
-                try:
-                    content = tool_result.to_content_str()
-                except Exception as e:
-                    success = False
-                    error = f"Tool result serialization failed: {e}"
-                    content = json.dumps({"error": error}, ensure_ascii=False)
+                results.append(HandlerLLM._normalize_tool_execution_result(
+                    call,
+                    success=False,
+                    data={},
+                    error=error or "Tool execution failed",
+                    content=None,
+                ))
+                continue
 
-            results.append({
-                "tool_call_id": call.get("id", ""),
-                "name": name,
-                "arguments": call.get("arguments", ""),
-                "parsed_args": parsed_args if isinstance(parsed_args, dict) else None,
-                "success": success,
-                "data": data,
-                "error": error,
-                "content": content,
-            })
+            success = bool(getattr(tool_result, "success", False))
+            data = getattr(tool_result, "data", {}) or {}
+            error = getattr(tool_result, "error", None)
+            try:
+                content = tool_result.to_content_str()
+            except Exception as e:
+                success = False
+                error = f"Tool result serialization failed: {e}"
+                content = None
+
+            results.append(HandlerLLM._normalize_tool_execution_result(
+                call,
+                success=success,
+                data=data,
+                error=error,
+                content=content,
+            ))
         return results
 
     @staticmethod
     def _build_tool_result_messages(tool_execution_results: List[dict]) -> List[dict]:
-        return [
-            {
+        messages = []
+        for result in tool_execution_results:
+            tool_call_id = result.get("tool_call_id", "")
+            if not tool_call_id:
+                logger.warning(f"Tool result missing tool_call_id: {result}")
+            content = result.get("content")
+            if content is None or not isinstance(content, str) or not content.strip():
+                content = HandlerLLM._json_tool_content({"error": "Missing tool result content"})
+            messages.append({
                 "role": "tool",
-                "tool_call_id": result.get("tool_call_id", ""),
-                "content": result.get("content", ""),
-            }
-            for result in tool_execution_results
-        ]
+                "tool_call_id": tool_call_id,
+                "content": content,
+            })
+        return messages
+
+    @staticmethod
+    def _build_tool_feedback_messages(base_messages: List[dict], context: LLMContext) -> List[dict]:
+        feedback_messages = [dict(message) for message in base_messages]
+        assistant_tool_call_message = getattr(context, "last_tool_call_message", None)
+        if assistant_tool_call_message:
+            feedback_messages.append(dict(assistant_tool_call_message))
+        feedback_messages.extend(
+            dict(message)
+            for message in (getattr(context, "pending_tool_result_messages", []) or [])
+        )
+        return feedback_messages
+
+    @staticmethod
+    def _build_tool_feedback_completion_kwargs(
+        context: LLMContext,
+        feedback_messages: List[dict],
+    ) -> dict:
+        return {
+            "model": context.model_name,
+            "messages": feedback_messages,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+            "extra_body": DEEPSEEK_DISABLE_THINKING_EXTRA_BODY,
+        }
+
+    @staticmethod
+    def _prepare_tool_feedback_request(
+        context: LLMContext,
+        base_messages: List[dict],
+        stream_key: Optional[str],
+        turn_id: Optional[str],
+    ) -> bool:
+        context.tool_feedback_messages = []
+        context.tool_feedback_completion_kwargs = None
+
+        assistant_tool_call_message = getattr(context, "last_tool_call_message", None)
+        tool_result_messages = getattr(context, "pending_tool_result_messages", []) or []
+        ready = bool(assistant_tool_call_message and tool_result_messages)
+        if ready:
+            context.tool_feedback_messages = HandlerLLM._build_tool_feedback_messages(
+                base_messages,
+                context,
+            )
+            context.tool_feedback_completion_kwargs = HandlerLLM._build_tool_feedback_completion_kwargs(
+                context,
+                context.tool_feedback_messages,
+            )
+
+        audit_event(
+            context,
+            "llm_tool_feedback_ready",
+            stream_key=stream_key,
+            turn_id=turn_id,
+            llm_stage="tool_feedback",
+            model=context.model_name,
+            ready=ready,
+            has_assistant_tool_call_message=bool(assistant_tool_call_message),
+            tool_result_message_count=len(tool_result_messages),
+            feedback_message_count=len(context.tool_feedback_messages),
+            completion_kwargs_ready=bool(context.tool_feedback_completion_kwargs),
+        )
+        return ready
 
     @staticmethod
     def _dispatch_music_tool_results(
@@ -1053,6 +1179,7 @@ class HandlerLLM(HandlerBase, ABC):
                 pending_tool_result_messages=context.pending_tool_result_messages,
                 tool_call_count=len(pending_tool_calls),
                 result_count=len(context.tool_execution_results),
+                tool_result_message_count=len(context.pending_tool_result_messages),
                 executed=True,
                 tool_side_effect_dispatched=tool_side_effect_dispatched,
             )
