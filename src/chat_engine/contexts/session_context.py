@@ -12,6 +12,8 @@ class SharedStates:
     persona_runtime: Optional[Dict] = None
     device_info: Optional[Dict] = None
     client_endpoint: Optional[str] = None
+    music_status: Optional[Dict] = None
+    music_player_active: bool = False
 
 
 class SessionContext(object):

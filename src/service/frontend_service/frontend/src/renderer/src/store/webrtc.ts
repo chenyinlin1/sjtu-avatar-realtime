@@ -1,5 +1,5 @@
 import { WS } from '@/helpers/ws'
-import type { DeviceInfoPayload, SignalBody, TextPayload } from '@/interface/eventType'
+import type { DeviceInfoPayload, MusicStatusPayload, SignalBody, TextPayload } from '@/interface/eventType'
 import { WsEventTypes, WsProtocol } from '@/interface/eventType'
 import { StreamState } from '@/interface/voiceChat'
 import { AvatarHandler } from '@renderer/handlers/avatarHandler'
@@ -52,6 +52,8 @@ export const useVideoChatStore = defineStore('videoChatStore', {
             case 'disconnected':
               this.streamState = StreamState.closed
               stop(this.peerConnection!)
+              chatStore.setMusicStatusSender(null)
+              this.chatDataChannel = null
               break
             default:
               break
@@ -63,6 +65,7 @@ export const useVideoChatStore = defineStore('videoChatStore', {
             this.streamState = StreamState.open
             this.webRTCId = webRTCId as string
             this.chatDataChannel = dataChannel as RTCDataChannel
+            chatStore.setMusicStatusSender((payload) => this.sendMusicStatus(payload))
             this.initChatDataChannel()
             this.sendDeviceInfo()
 
@@ -77,6 +80,7 @@ export const useVideoChatStore = defineStore('videoChatStore', {
           .catch((e: unknown) => {
             console.info('catching', e)
             this.streamState = StreamState.closed
+            chatStore.setMusicStatusSender(null)
             const errorMessage = e instanceof Error ? e.message : String(e)
             message.error(errorMessage)
             message.error('请检查是否超过数字人并发上限')
@@ -88,6 +92,7 @@ export const useVideoChatStore = defineStore('videoChatStore', {
         this.streamState = StreamState.closed
         appStore.resetChatRecords()
         this.chatDataChannel = null
+        chatStore.setMusicStatusSender(null)
         chatStore.replying = false
         await mediaStore.accessDevice()
         if (appStore.avatarType === 'lam') {
@@ -123,6 +128,23 @@ export const useVideoChatStore = defineStore('videoChatStore', {
       } else {
         this.chatDataChannel.addEventListener('open', send, { once: true })
       }
+    },
+    sendMusicStatus(payload: MusicStatusPayload): boolean {
+      if (!this.chatDataChannel || this.chatDataChannel.readyState !== 'open') {
+        console.info('[music] MusicStatus skipped: data channel is not open', payload)
+        return false
+      }
+      this.chatDataChannel.send(
+        JSON.stringify({
+          header: {
+            name: WsProtocol.MusicStatus,
+            request_id: nanoid(),
+          },
+          payload,
+        })
+      )
+      console.info('[music] MusicStatus sent', payload)
+      return true
     },
     sendText(text: string) {
       if (!text || !this.chatDataChannel) return

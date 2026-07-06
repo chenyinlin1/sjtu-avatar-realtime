@@ -92,6 +92,21 @@ def _fake_web_search_schema():
     }
 
 
+def _fake_music_control_schema():
+    return {
+        "type": "function",
+        "function": {
+            "name": "music_control",
+            "description": "control music",
+            "parameters": {
+                "type": "object",
+                "properties": {"action": {"type": "string"}},
+                "required": ["action"],
+            },
+        },
+    }
+
+
 def test_completion_kwargs_force_web_search_for_weather_query():
     context = LLMContext("test-session")
     context.enable_tool_definitions = True
@@ -207,3 +222,33 @@ def test_music_stop_control_interrupts_pending_avatar_response_streams():
     assert emitted_signals[0].type == ChatSignalType.INTERRUPT
     assert emitted_signals[0].source_type == ChatSignalSourceType.HANDLER
     assert emitted_signals[0].signal_data["reason"] == "music_stop"
+
+
+def test_completion_kwargs_prioritizes_music_control_over_web_search_when_music_playing():
+    context = LLMContext("test-session")
+    context.enable_tool_definitions = True
+    context.tool_schemas = [_fake_web_search_schema(), _fake_music_control_schema()]
+    context.tool_choice = "auto"
+    context.web_search_always = True
+    context.shared_states = SimpleNamespace(
+        music_status={"state": "playing"},
+        music_player_active=True,
+    )
+
+    kwargs = HandlerLLM._build_completion_kwargs(
+        context,
+        [{"role": "user", "content": "暂停。"}],
+        "暂停。",
+    )
+
+    assert kwargs["tool_choice"] == {"type": "function", "function": {"name": "music_control"}}
+
+
+def test_explicit_music_stop_can_be_direct_even_without_synced_music_status():
+    context = LLMContext("test-session")
+    context.shared_states = SimpleNamespace(music_status=None, music_player_active=False)
+
+    control = HandlerLLM._extract_music_control("停止播放音乐。")
+
+    assert control == {"action": "stop"}
+    assert HandlerLLM._should_handle_music_control_direct(context, "停止播放音乐。", control)

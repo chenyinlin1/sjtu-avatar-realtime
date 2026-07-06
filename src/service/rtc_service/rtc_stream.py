@@ -35,6 +35,8 @@ from engine_utils.conversation_audit_logger import audit_event
 
 
 _AV_SYNC_DIAG = os.getenv("AV_SYNC_DIAG", "").lower() in {"1", "true", "yes", "on"}
+_MUSIC_STATUS_ACTIVE_STATES = {"loading", "playing", "paused"}
+_MUSIC_STATUS_ALLOWED_STATES = _MUSIC_STATUS_ACTIVE_STATES | {"stopped", "ended", "error"}
 try:
     _AV_SYNC_DIAG_EVERY = max(1, int(os.getenv("AV_SYNC_DIAG_EVERY", "1")))
 except ValueError:
@@ -403,6 +405,41 @@ class RtcStream(AsyncAudioVideoStreamHandler):
             },
         )
 
+    def _handle_music_status(self, payload: Dict[str, Any], request_id: str):
+        if self.client_session_delegate is None:
+            return
+        if not isinstance(payload, dict):
+            payload = {}
+
+        raw_state = payload.get("state")
+        state = str(raw_state or "").strip().lower()
+        if state not in _MUSIC_STATUS_ALLOWED_STATES:
+            logger.warning(f"[{self.session_id}] MusicStatus rejected: invalid state={raw_state!r}")
+            return
+
+        status = {
+            "state": state,
+            "received_at": time.time(),
+            "request_id": request_id,
+        }
+        for key in ("reason", "title", "artist", "url", "position_ms", "duration_ms", "error"):
+            value = payload.get(key)
+            if value is not None:
+                status[key] = value
+
+        active = state in _MUSIC_STATUS_ACTIVE_STATES
+        setattr(self.client_session_delegate, "music_status", status)
+        setattr(self.client_session_delegate, "music_player_active", active)
+        shared_states = getattr(self.client_session_delegate, "shared_states", None)
+        if shared_states is not None:
+            shared_states.music_status = status
+            shared_states.music_player_active = active
+
+        logger.info(
+            f"[{self.session_id}] MusicStatus received: state={state} active={active} "
+            f"reason={status.get('reason') or '-'} title={status.get('title') or '-'}"
+        )
+
     def set_channel(self, channel):
             super().set_channel(channel)
             self.chat_channel = channel
@@ -432,6 +469,10 @@ class RtcStream(AsyncAudioVideoStreamHandler):
                 if message_name == "DeviceInfo":
                     logger.info(f'on_chat_datachannel: {message}')
                     self._handle_device_info(payload, request_id)
+                    return
+                if message_name == "MusicStatus":
+                    logger.info(f'on_chat_datachannel: {message}')
+                    self._handle_music_status(payload, request_id)
                     return
                 timestamp = self.client_session_delegate.get_timestamp()
                 if timestamp[0] / timestamp[1] < self.stream_start_delay:

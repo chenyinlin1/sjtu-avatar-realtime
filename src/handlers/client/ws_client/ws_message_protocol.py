@@ -3,7 +3,7 @@ WebSocket 消息协议定义
 定义所有 JSON 消息的 Pydantic 模型
 """
 import time
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Literal
 from pydantic import BaseModel, Field
 from enum import Enum
 from loguru import logger
@@ -22,6 +22,7 @@ class MessageType(str, Enum):
     SEND_HUMAN_TEXT = "SendHumanText"
     TRIGGER_HEARTBEAT = "TriggerHeartbeat"
     INTERRUPT = "Interrupt"
+    MUSIC_STATUS = "MusicStatus"
     
     # 输入端口 - 服务器消息
     AVATAR_SESSION_INITIALIZED = "AvatarSessionInitialized"
@@ -150,6 +151,27 @@ class TriggerHeartbeat(BaseModel):
 class Interrupt(BaseModel):
     """打断信号"""
     header: MessageHeader
+
+
+MusicPlaybackState = Literal["loading", "playing", "paused", "stopped", "ended", "error"]
+
+
+class MusicStatusPayload(BaseModel):
+    """音箱端音乐播放状态上报"""
+    state: MusicPlaybackState = Field(..., description="音乐播放状态")
+    reason: Optional[str] = Field(default=None, description="状态变化原因")
+    title: Optional[str] = Field(default=None, description="歌曲标题")
+    artist: Optional[str] = Field(default=None, description="歌手")
+    url: Optional[str] = Field(default=None, description="播放 URL")
+    position_ms: Optional[int] = Field(default=None, description="当前播放位置，毫秒")
+    duration_ms: Optional[int] = Field(default=None, description="总时长，毫秒")
+    error: Optional[str] = Field(default=None, description="错误信息")
+
+
+class MusicStatus(BaseModel):
+    """音箱端音乐播放状态"""
+    header: MessageHeader
+    payload: MusicStatusPayload
 
 
 # ============================================================================
@@ -364,6 +386,7 @@ def parse_message(json_data: dict) -> Optional[BaseMessage]:
             MessageType.SEND_HUMAN_TEXT: SendHumanText,
             MessageType.TRIGGER_HEARTBEAT: TriggerHeartbeat,
             MessageType.INTERRUPT: Interrupt,
+            MessageType.MUSIC_STATUS: MusicStatus,
             MessageType.AVATAR_SESSION_INITIALIZED: AvatarSessionInitialized,
             MessageType.ECHO_HUMAN_TEXT: EchoHumanText,
             MessageType.ECHO_AVATAR_TEXT: EchoAvatarText,

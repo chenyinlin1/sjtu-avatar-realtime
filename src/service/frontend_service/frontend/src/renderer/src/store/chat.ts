@@ -4,7 +4,7 @@ import { markRaw } from 'vue'
 
 import EventEmitter from 'eventemitter3'
 
-import { EventTypes, SignalBody, TextPayload } from '@/interface/eventType'
+import { EventTypes, MusicStatusPayload, SignalBody, TextPayload } from '@/interface/eventType'
 import { TYVoiceChatState } from '@/interface/voiceChat'
 
 import { useAppStore } from './app'
@@ -37,14 +37,20 @@ interface TextPayloadWithClientAction extends Partial<TextPayload> {
   }
 }
 
+type MusicStatusSender = (payload: MusicStatusPayload) => boolean | void
+
 interface ChatState {
   volumeMuted: boolean
   showChatRecords: boolean
   replying: boolean
   activeRenderer: AvatarLike | null
+  musicStatusSender: MusicStatusSender | null
   musicAudio: HTMLAudioElement | null
   musicVolume: number
   musicMuted: boolean
+  musicTitle?: string
+  musicArtist?: string
+  musicUrl?: string
 }
 
 function summarizeMusicUrl(url?: string): string {
@@ -62,6 +68,14 @@ function musicErrorInfo(error: unknown) {
     return { name: error.name, message: error.message }
   }
   return { message: String(error) }
+}
+
+function musicAudioTiming(audio: HTMLAudioElement | null) {
+  if (!audio) return {}
+  return {
+    position_ms: Number.isFinite(audio.currentTime) ? Math.round(audio.currentTime * 1000) : undefined,
+    duration_ms: Number.isFinite(audio.duration) ? Math.round(audio.duration * 1000) : undefined,
+  }
 }
 
 function musicAudioState(audio: HTMLAudioElement | null) {
@@ -82,13 +96,49 @@ export const useChatStore = defineStore('chatStore', {
     showChatRecords: false,
     replying: false,
     activeRenderer: null,
+    musicStatusSender: null,
     musicAudio: null,
     musicVolume: 1,
     musicMuted: false,
+    musicTitle: undefined,
+    musicArtist: undefined,
+    musicUrl: undefined,
   }),
   actions: {
     setActiveRenderer(renderer: AvatarLike | null) {
       this.activeRenderer = renderer
+    },
+    setMusicStatusSender(sender: MusicStatusSender | null) {
+      this.musicStatusSender = sender
+    },
+    reportMusicStatus(payload: MusicStatusPayload) {
+      if (!this.musicStatusSender) {
+        console.info('[music] MusicStatus skipped: sender is not ready', payload)
+        return
+      }
+      this.musicStatusSender(payload)
+    },
+    buildMusicStatus(
+      state: MusicStatusPayload['state'],
+      reason: string,
+      audio?: HTMLAudioElement | null,
+      error?: string
+    ): MusicStatusPayload {
+      const currentAudio = audio === undefined ? this.musicAudio : audio
+      return {
+        state,
+        reason,
+        title: this.musicTitle,
+        artist: this.musicArtist,
+        url: this.musicUrl,
+        ...musicAudioTiming(currentAudio),
+        ...(error ? { error } : {}),
+      }
+    },
+    clearMusicInfo() {
+      this.musicTitle = undefined
+      this.musicArtist = undefined
+      this.musicUrl = undefined
     },
 
     handleVolumeMute() {
@@ -155,6 +205,9 @@ export const useChatStore = defineStore('chatStore', {
         this.musicAudio.pause()
         this.musicAudio.src = ''
       }
+      this.musicTitle = action.title
+      this.musicArtist = action.artist
+      this.musicUrl = action.url
       const audio = markRaw(new Audio(action.url))
       audio.preload = 'auto'
       audio.volume = this.musicVolume
@@ -170,17 +223,22 @@ export const useChatStore = defineStore('chatStore', {
       }, { once: true })
       audio.addEventListener('playing', () => {
         console.info('[music] audio playing', state())
+        this.reportMusicStatus(this.buildMusicStatus('playing', 'play_started', audio))
       })
       audio.addEventListener('error', () => {
         console.error('[music] audio error', state())
+        this.reportMusicStatus(this.buildMusicStatus('error', 'play_error', audio, audio.error?.message))
       })
       audio.addEventListener('ended', () => {
         console.info('[music] audio ended', state())
+        this.reportMusicStatus(this.buildMusicStatus('ended', 'play_ended', audio))
         if (this.musicAudio === audio) {
           this.musicAudio = null
+          this.clearMusicInfo()
         }
       })
       this.musicAudio = audio
+      this.reportMusicStatus(this.buildMusicStatus('loading', 'play_requested', audio))
       audio
         .play()
         .then(() => {
@@ -188,6 +246,9 @@ export const useChatStore = defineStore('chatStore', {
         })
         .catch((e) => {
           console.error('[music] play failed', { ...musicErrorInfo(e), ...state() })
+          this.reportMusicStatus(
+            this.buildMusicStatus('error', 'play_failed', audio, musicErrorInfo(e).message)
+          )
         })
     },
 
@@ -200,24 +261,38 @@ export const useChatStore = defineStore('chatStore', {
       })
       switch (action.action) {
         case 'pause':
-          audio?.pause()
+          if (audio) {
+            audio.pause()
+            this.reportMusicStatus(this.buildMusicStatus('paused', 'pause_control', audio))
+          } else {
+            this.reportMusicStatus(this.buildMusicStatus('error', 'pause_failed', null, 'no active music audio'))
+          }
           break
         case 'resume':
           audio
             ?.play()
             .then(() => {
               console.info('[music] resume promise resolved', musicAudioState(audio))
+              this.reportMusicStatus(this.buildMusicStatus('playing', 'resume_control', audio))
             })
             .catch((e) => {
               console.error('[music] resume failed', { ...musicErrorInfo(e), ...musicAudioState(audio) })
+              this.reportMusicStatus(
+                this.buildMusicStatus('error', 'resume_failed', audio, musicErrorInfo(e).message)
+              )
             })
+          if (!audio) {
+            this.reportMusicStatus(this.buildMusicStatus('error', 'resume_failed', null, 'no active music audio'))
+          }
           break
         case 'stop':
           if (audio) {
             audio.pause()
             audio.src = ''
           }
+          this.reportMusicStatus(this.buildMusicStatus('stopped', 'stop_control', audio))
           this.musicAudio = null
+          this.clearMusicInfo()
           break
         case 'next':
           if (audio) {
@@ -226,7 +301,9 @@ export const useChatStore = defineStore('chatStore', {
               audio.currentTime = audio.duration
             }
           }
+          this.reportMusicStatus(this.buildMusicStatus('ended', 'next_control', audio))
           this.musicAudio = null
+          this.clearMusicInfo()
           break
         case 'volume': {
           const delta = typeof action.delta === 'number' ? action.delta : 0

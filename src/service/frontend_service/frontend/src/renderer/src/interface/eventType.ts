@@ -17,6 +17,7 @@ export enum WsProtocol {
   TriggerHeartbeat = 'TriggerHeartbeat',
   Interrupt = 'Interrupt',
   DeviceInfo = 'DeviceInfo',
+  MusicStatus = 'MusicStatus',
   DeviceInfoAck = 'DeviceInfoAck',
   EndSpeech = 'EndSpeech',
   AvatarSessionInitialized = 'AvatarSessionInitialized',
@@ -113,6 +114,19 @@ export interface DeviceInfoPayload {
   elder_id?: string
   tenant_id?: string
   persona_id?: string
+}
+
+export type MusicPlaybackState = 'loading' | 'playing' | 'paused' | 'stopped' | 'ended' | 'error'
+
+export interface MusicStatusPayload {
+  state: MusicPlaybackState
+  reason?: string
+  title?: string
+  artist?: string
+  url?: string
+  position_ms?: number
+  duration_ms?: number
+  error?: string
 }
 
 export interface DeviceInfoAckPayload {
@@ -244,6 +258,7 @@ export type WsPayloadMap = {
   [WsProtocol.TriggerHeartbeat]: undefined
   [WsProtocol.Interrupt]: InterruptPayload
   [WsProtocol.DeviceInfo]: DeviceInfoPayload
+  [WsProtocol.MusicStatus]: MusicStatusPayload
   [WsProtocol.DeviceInfoAck]: DeviceInfoAckPayload
   [WsProtocol.EndSpeech]: EndSpeechPayload
   [WsProtocol.AvatarSessionInitialized]: undefined
@@ -293,6 +308,7 @@ export type WsOutboundMessage = WsMessage<
   | WsProtocol.TriggerHeartbeat
   | WsProtocol.Interrupt
   | WsProtocol.DeviceInfo
+  | WsProtocol.MusicStatus
   | WsProtocol.EndSpeech
 >
 

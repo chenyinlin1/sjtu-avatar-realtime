@@ -100,7 +100,7 @@ class SemanticTurnDetectorContext(HandlerContext):
 
         # State tracking
         self.last_interrupt_time: float = 0
-        self.interrupt_cooldown: float = 1.0  # Cooldown between interrupts
+        self.interrupt_cooldown: float = 0.5  # 李思江2026.07.06调整，原为1.0，调整为0.5
         
         # Deduplication for partial text - use stream_id + text to avoid race conditions
         self.processed_partial_texts: Dict[str, str] = {}  # stream_id -> last_text

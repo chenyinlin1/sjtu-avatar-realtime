@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import time
 from datetime import datetime
 from typing import Dict, List, Optional, Set, Tuple, cast
 from loguru import logger
@@ -25,6 +26,11 @@ from .scopemem_adapter import OpenAvatarScopeMemory
 from .search_engine import format_search_results, search_bocha
 from chat_engine.data_models.chat_stream_config import ChatStreamConfig
 from engine_utils.conversation_audit_logger import audit_event
+
+
+MUSIC_ACTIVE_STATES = {"loading", "playing", "paused"}
+MUSIC_DIRECT_PAUSE_STATES = {"playing"}
+
 
 try:
     from handlers.agent.tools.music_request import MusicRequestTool
@@ -364,6 +370,7 @@ class HandlerLLM(HandlerBase, ABC):
             handler_config = LLMConfig()
         context = LLMContext(session_context.session_info.session_id)
         context.shared_states = session_context.shared_states
+        context.music_player_active = bool(getattr(session_context.shared_states, "music_player_active", False))
         context.model_name = handler_config.model_name
         context.system_prompt = {'role': 'system', 'content': XIAOBAN_SYSTEM_PROMPT}
         context.api_key = handler_config.api_key
@@ -512,6 +519,30 @@ class HandlerLLM(HandlerBase, ABC):
             source="human_text",
         )
         context.current_audit_turn_id = turn_id
+        music_control = self._extract_music_control(chat_text)
+        if music_control and self._should_handle_music_control_direct(context, chat_text, music_control):
+            logger.info(f"Music control detected by shared state route: {music_control}")
+            audit_event(
+                context,
+                "llm_skipped",
+                stream_identity=inputs.stream_id,
+                bind_stream_key=stream_key,
+                turn_id=turn_id,
+                llm_stage="main_response",
+                reason="music_status_control",
+                user_text=chat_text,
+                control=music_control,
+                music_status=self._get_shared_music_status(context),
+            )
+            self._handle_music_control(
+                context,
+                music_control,
+                output_definition,
+                streamer,
+                stream_key,
+                chat_text,
+            )
+            return
         if context.enable_legacy_music_shortcuts:
             music_control = self._extract_music_control(chat_text)
             if music_control:
@@ -862,6 +893,12 @@ class HandlerLLM(HandlerBase, ABC):
         configured_choice = getattr(context, "tool_choice", None)
         if (
             configured_choice != "none"
+            and HandlerLLM._should_force_music_control_tool(context, user_text)
+        ):
+            logger.info(f"LLM forcing music_control tool_choice for user_text={user_text[:120]!r}")
+            return {"type": "function", "function": {"name": "music_control"}}
+        if (
+            configured_choice != "none"
             and HandlerLLM._should_force_web_search_tool(context, user_text)
         ):
             logger.info(f"LLM forcing web_search tool_choice for user_text={user_text[:120]!r}")
@@ -887,6 +924,16 @@ class HandlerLLM(HandlerBase, ABC):
             return False
         function = tool_choice.get("function")
         return isinstance(function, dict) and function.get("name") == tool_name
+
+    @staticmethod
+    def _should_force_music_control_tool(context: LLMContext, user_text: str) -> bool:
+        if not HandlerLLM._has_tool_schema(context, "music_control"):
+            return False
+        music_control = HandlerLLM._extract_music_control(user_text)
+        return bool(
+            music_control
+            and HandlerLLM._should_handle_music_control_direct(context, user_text, music_control)
+        )
 
     @staticmethod
     def _should_force_web_search_tool(context: LLMContext, query: str) -> bool:
@@ -1378,9 +1425,14 @@ class HandlerLLM(HandlerBase, ABC):
                 if not action:
                     continue
                 if action == "stop":
-                    context.music_player_active = False
+                    HandlerLLM._set_music_player_active(context, False)
+                    HandlerLLM._mark_shared_music_status(context, "stopped", "server_control_stop")
                 elif action in {"pause", "resume", "next", "volume", "mute", "unmute"}:
-                    context.music_player_active = True
+                    HandlerLLM._set_music_player_active(context, True)
+                    if action == "pause":
+                        HandlerLLM._mark_shared_music_status(context, "paused", "server_control_pause")
+                    elif action == "resume":
+                        HandlerLLM._mark_shared_music_status(context, "playing", "server_control_resume")
 
                 output = DataBundle(output_definition)
                 output.set_main_data("")
@@ -1425,7 +1477,8 @@ class HandlerLLM(HandlerBase, ABC):
                 source = data.get("source") or ""
                 candidates = data.get("candidates") or []
 
-                context.music_player_active = True
+                HandlerLLM._set_music_player_active(context, True)
+                HandlerLLM._mark_shared_music_status(context, "loading", "server_play_dispatched")
                 output = DataBundle(output_definition)
                 output.set_main_data("")
                 output.add_meta("client_action", {
@@ -1850,6 +1903,87 @@ class HandlerLLM(HandlerBase, ABC):
         return any(keyword in query for keyword in trigger_keywords)
 
     @staticmethod
+    def _get_shared_music_status(context) -> dict:
+        shared_states = getattr(context, "shared_states", None)
+        status = getattr(shared_states, "music_status", None) if shared_states is not None else None
+        return status if isinstance(status, dict) else {}
+
+    @staticmethod
+    def _get_shared_music_state(context) -> str:
+        state = HandlerLLM._get_shared_music_status(context).get("state")
+        return str(state or "").strip().lower()
+
+    @staticmethod
+    def _is_music_player_active(context) -> bool:
+        shared_states = getattr(context, "shared_states", None)
+        status = getattr(shared_states, "music_status", None) if shared_states is not None else None
+        if isinstance(status, dict) and status.get("state"):
+            return str(status.get("state") or "").strip().lower() in MUSIC_ACTIVE_STATES
+        if shared_states is not None and hasattr(shared_states, "music_player_active"):
+            return bool(getattr(shared_states, "music_player_active", False))
+        return bool(getattr(context, "music_player_active", False))
+
+    @staticmethod
+    def _set_music_player_active(context, active: bool) -> None:
+        context.music_player_active = active
+        shared_states = getattr(context, "shared_states", None)
+        if shared_states is not None:
+            shared_states.music_player_active = active
+
+    @staticmethod
+    def _mark_shared_music_status(context, state: str, reason: str) -> None:
+        shared_states = getattr(context, "shared_states", None)
+        if shared_states is None:
+            return
+        status = dict(getattr(shared_states, "music_status", None) or {})
+        status.update({
+            "state": state,
+            "reason": reason,
+            "received_at": time.time(),
+            "source": "server",
+        })
+        shared_states.music_status = status
+
+    @staticmethod
+    def _should_handle_music_control_direct(context, text: str, control: dict) -> bool:
+        action = (control or {}).get("action")
+        if not action:
+            return False
+        state = HandlerLLM._get_shared_music_state(context)
+        active = HandlerLLM._is_music_player_active(context)
+        if action == "stop":
+            return active or HandlerLLM._is_explicit_music_stop_text(text)
+        if action == "pause":
+            return active or state in MUSIC_DIRECT_PAUSE_STATES
+        if action in {"resume", "next", "volume", "mute", "unmute"}:
+            return active
+        return False
+
+    @staticmethod
+    def _is_explicit_music_stop_text(text: str) -> bool:
+        compact = re.sub(r"\s+", "", text or "")
+        return any(
+            keyword in compact for keyword in (
+                "停止音乐",
+                "停止播放",
+                "停止放歌",
+                "停止这首歌",
+                "结束播放",
+                "结束音乐",
+                "关闭音乐",
+                "关掉音乐",
+                "关掉播放",
+                "退出音乐",
+                "别放了",
+                "别播了",
+                "别播放了",
+                "不要放了",
+                "不要播放了",
+                "不听了",
+            )
+        )
+
+    @staticmethod
     def _extract_music_request(text: str) -> str:
         normalized = (text or "").strip()
         if not normalized:
@@ -1968,7 +2102,8 @@ class HandlerLLM(HandlerBase, ABC):
         if stream_key:
             context.active_stream_keys.add(stream_key)
         if play_url:
-            context.music_player_active = True
+            HandlerLLM._set_music_player_active(context, True)
+            HandlerLLM._mark_shared_music_status(context, "loading", "server_play_dispatched")
             output = DataBundle(output_definition)
             output.set_main_data("")
             output.add_meta("client_action", {
@@ -2017,9 +2152,14 @@ class HandlerLLM(HandlerBase, ABC):
             context.active_stream_keys.add(stream_key)
         action = control.get("action")
         if action == "stop":
-            context.music_player_active = False
+            HandlerLLM._set_music_player_active(context, False)
+            HandlerLLM._mark_shared_music_status(context, "stopped", "server_control_stop")
         elif action in {"pause", "resume", "next", "volume", "mute", "unmute"}:
-            context.music_player_active = True
+            HandlerLLM._set_music_player_active(context, True)
+            if action == "pause":
+                HandlerLLM._mark_shared_music_status(context, "paused", "server_control_pause")
+            elif action == "resume":
+                HandlerLLM._mark_shared_music_status(context, "playing", "server_control_resume")
         output = DataBundle(output_definition)
         output.set_main_data("")
         output.add_meta("client_action", {
