@@ -49,8 +49,8 @@ class BochaWebSearchTool(BaseTool):
     def description(self) -> str:
         return (
             "搜索互联网网页信息。当用户询问最新消息、实时资料、事实核验、"
-            "新闻、价格、政策、产品信息，或任何需要联网查询的问题时使用。"
-            "返回网页标题、链接、摘要、站点和发布时间。"
+            "天气、赛事赛果、赛程、新闻、价格、政策、产品信息，"
+            "或任何需要联网查询的问题时使用。返回网页标题、链接、摘要、站点和发布时间。"
         )
 
     @property
@@ -178,5 +178,15 @@ def _extract_web_results(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
     return results
 
 
-def register_tools(registry, **_kwargs) -> None:
-    registry.register(BochaWebSearchTool())
+def register_tools(registry, **kwargs) -> None:
+    config = kwargs.get("config")
+    context = kwargs.get("context")
+    source = context or config
+    default_count = getattr(source, "web_search_result_limit", None) or 8
+    timeout = getattr(source, "web_search_timeout", None) or 15.0
+    registry.register(BochaWebSearchTool(
+        api_key=getattr(source, "bocha_api_key", None),
+        endpoint=getattr(source, "bocha_endpoint", None),
+        default_count=default_count,
+        timeout=timeout,
+    ))

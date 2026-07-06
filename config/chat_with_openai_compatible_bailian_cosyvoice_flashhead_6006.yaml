@@ -99,7 +99,7 @@ default:
         module: llm/openai_compatible/llm_handler_openai_compatible
         model_name: "deepseek-v4-flash"
         enable_video_input: False
-        history_length: 8
+        history_length: 8     #短期上下文的参数，相当于四次一问一答
         enable_scopemem: True
         scopemem_store_path: "runtime/scopemem/memories.jsonl"
         scopemem_user_name: "User"
@@ -121,7 +121,6 @@ default:
         enable_tool_execution: true
         enable_legacy_music_shortcuts: false
         tool_modules:
-          - "handlers.agent.tools.demo_tools"
           - "handlers.agent.tools.web_search"
           - "handlers.agent.tools.music_request"
           - "handlers.agent.tools.music_control"

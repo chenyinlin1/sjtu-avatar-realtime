@@ -77,6 +77,82 @@ def test_bocha_search_skips_local_time_questions_even_when_forced(monkeypatch):
     assert handler._build_bocha_search_context(context, "现在几点了") == ""
 
 
+def _fake_web_search_schema():
+    return {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "search",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            },
+        },
+    }
+
+
+def test_completion_kwargs_force_web_search_for_weather_query():
+    context = LLMContext("test-session")
+    context.enable_tool_definitions = True
+    context.tool_schemas = [_fake_web_search_schema()]
+    context.tool_choice = "auto"
+
+    kwargs = HandlerLLM._build_completion_kwargs(
+        context,
+        [{"role": "user", "content": "今天上海的天气怎么样？"}],
+        "今天上海的天气怎么样？",
+    )
+
+    assert kwargs["tool_choice"] == {"type": "function", "function": {"name": "web_search"}}
+
+
+def test_completion_kwargs_force_web_search_for_recent_sports_results():
+    context = LLMContext("test-session")
+    context.enable_tool_definitions = True
+    context.tool_schemas = [_fake_web_search_schema()]
+    context.tool_choice = "auto"
+
+    kwargs = HandlerLLM._build_completion_kwargs(
+        context,
+        [{"role": "user", "content": "昨天世界杯的赛果怎么样？"}],
+        "昨天世界杯的赛果怎么样？",
+    )
+
+    assert kwargs["tool_choice"] == {"type": "function", "function": {"name": "web_search"}}
+
+
+def test_completion_kwargs_do_not_force_web_search_for_plain_today_chat():
+    context = LLMContext("test-session")
+    context.enable_tool_definitions = True
+    context.tool_schemas = [_fake_web_search_schema()]
+    context.tool_choice = "auto"
+
+    kwargs = HandlerLLM._build_completion_kwargs(
+        context,
+        [{"role": "user", "content": "今天晚上吃啥好？"}],
+        "今天晚上吃啥好？",
+    )
+
+    assert kwargs["tool_choice"] == "auto"
+
+
+def test_completion_kwargs_do_not_force_web_search_for_local_time_even_when_always_on():
+    context = LLMContext("test-session")
+    context.enable_tool_definitions = True
+    context.tool_schemas = [_fake_web_search_schema()]
+    context.tool_choice = "auto"
+    context.web_search_always = True
+
+    kwargs = HandlerLLM._build_completion_kwargs(
+        context,
+        [{"role": "user", "content": "现在几点了？"}],
+        "现在几点了？",
+    )
+
+    assert kwargs["tool_choice"] == "auto"
+
+
 def test_music_control_stop_recognizes_natural_stop_phrases():
     handler = HandlerLLM()
 

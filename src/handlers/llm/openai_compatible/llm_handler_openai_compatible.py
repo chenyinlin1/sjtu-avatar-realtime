@@ -263,7 +263,6 @@ class LLMConfig(HandlerBaseConfigModel, BaseModel):
     enable_legacy_music_shortcuts: bool = Field(default=False)
     tool_modules: List[str] = Field(
         default_factory=lambda: [
-            "handlers.agent.tools.demo_tools",
             "handlers.agent.tools.web_search",
             "handlers.agent.tools.music_request",
             "handlers.agent.tools.music_control",
@@ -583,6 +582,7 @@ class HandlerLLM(HandlerBase, ABC):
         try:
             messages = [
                 self._system_prompt_for_context(context),
+                self._build_current_time_context(context),
             ] + current_content
             if context.scopemem is not None:
                 memory_context = self._build_scopemem_context(context, chat_text)
@@ -595,7 +595,7 @@ class HandlerLLM(HandlerBase, ABC):
                 )
                 if support_context:
                     messages.append(support_context)
-            create_kwargs = self._build_completion_kwargs(context, messages)
+            create_kwargs = self._build_completion_kwargs(context, messages, chat_text)
 
             audit_event(
                 context,
@@ -607,6 +607,9 @@ class HandlerLLM(HandlerBase, ABC):
                 model=context.model_name,
                 messages=messages,
                 user_text=chat_text,
+                has_tools=bool(create_kwargs.get("tools")),
+                tool_choice=create_kwargs.get("tool_choice"),
+                tool_schema_names=self._tool_schema_names(create_kwargs.get("tools") or []),
             )
             context.current_image = None
             context.input_texts = ''
@@ -620,6 +623,27 @@ class HandlerLLM(HandlerBase, ABC):
                 streamer,
                 stream_key,
             )
+            if (
+                not cancelled
+                and not tool_calls
+                and self._is_forced_tool_choice(create_kwargs.get("tool_choice"), "web_search")
+            ):
+                logger.warning(
+                    "LLM was forced to call web_search but returned no tool_calls: "
+                    f"user_text={chat_text[:120]!r}"
+                )
+                audit_event(
+                    context,
+                    "llm_tool_call_missing",
+                    stream_identity=inputs.stream_id,
+                    bind_stream_key=stream_key,
+                    turn_id=turn_id,
+                    llm_stage="main_response",
+                    model=context.model_name,
+                    expected_tool="web_search",
+                    output_text=full_text,
+                    user_text=chat_text,
+                )
             if not cancelled and tool_calls:
                 self._handle_tool_calls(
                     context,
@@ -630,13 +654,39 @@ class HandlerLLM(HandlerBase, ABC):
                     stream_key,
                     turn_id,
                     chat_text,
+                    emit_empty_fallback=False,
                 )
-                self._prepare_tool_feedback_request(
+                feedback_ready = self._prepare_tool_feedback_request(
                     context,
                     messages,
                     stream_key,
                     turn_id,
                 )
+                if feedback_ready and not self._should_skip_tool_feedback_response(context):
+                    context.output_texts = ''
+                    _feedback_text, cancelled = self._run_tool_feedback_response(
+                        context,
+                        output_definition,
+                        streamer,
+                        stream_key,
+                        turn_id,
+                    )
+                    if not cancelled and not context.output_texts:
+                        fallback = "我处理好了。"
+                        context.output_texts = fallback
+                        output = DataBundle(output_definition)
+                        output.set_main_data(fallback)
+                        streamer.stream_data(output)
+                elif not context.output_texts:
+                    fallback = (
+                        "我已经调用工具确认了，这一步的结果回传还在接入中。"
+                        if context.enable_tool_execution else
+                        "我需要调用工具确认一下，这一步还在接入中。"
+                    )
+                    context.output_texts = fallback
+                    output = DataBundle(output_definition)
+                    output.set_main_data(fallback)
+                    streamer.stream_data(output)
             if not cancelled:
                 context.history.add_message(HistoryMessage(role="human", content=chat_text))
                 context.history.add_message(HistoryMessage(role="avatar", content=context.output_texts))
@@ -701,7 +751,11 @@ class HandlerLLM(HandlerBase, ABC):
 
 
     @staticmethod
-    def _build_completion_kwargs(context: LLMContext, messages: List[dict]) -> dict:
+    def _build_completion_kwargs(
+        context: LLMContext,
+        messages: List[dict],
+        user_text: str = "",
+    ) -> dict:
         kwargs = {
             "model": context.model_name,
             "messages": messages,
@@ -711,9 +765,149 @@ class HandlerLLM(HandlerBase, ABC):
         }
         if context.enable_tool_definitions and context.tool_schemas:
             kwargs["tools"] = context.tool_schemas
-            if context.tool_choice:
-                kwargs["tool_choice"] = context.tool_choice
+            tool_choice = HandlerLLM._tool_choice_for_turn(context, user_text)
+            if tool_choice:
+                kwargs["tool_choice"] = tool_choice
         return kwargs
+
+    @staticmethod
+    def _tool_choice_for_turn(context: LLMContext, user_text: str = ""):
+        configured_choice = getattr(context, "tool_choice", None)
+        if (
+            configured_choice != "none"
+            and HandlerLLM._should_force_web_search_tool(context, user_text)
+        ):
+            logger.info(f"LLM forcing web_search tool_choice for user_text={user_text[:120]!r}")
+            return {"type": "function", "function": {"name": "web_search"}}
+        return configured_choice
+
+    @staticmethod
+    def _tool_schema_names(tool_schemas: List[dict]) -> List[str]:
+        names = []
+        for schema in tool_schemas or []:
+            function = schema.get("function") if isinstance(schema, dict) else None
+            if isinstance(function, dict) and function.get("name"):
+                names.append(function["name"])
+        return names
+
+    @staticmethod
+    def _has_tool_schema(context: LLMContext, tool_name: str) -> bool:
+        return tool_name in HandlerLLM._tool_schema_names(getattr(context, "tool_schemas", []) or [])
+
+    @staticmethod
+    def _is_forced_tool_choice(tool_choice, tool_name: str) -> bool:
+        if not isinstance(tool_choice, dict):
+            return False
+        function = tool_choice.get("function")
+        return isinstance(function, dict) and function.get("name") == tool_name
+
+    @staticmethod
+    def _should_force_web_search_tool(context: LLMContext, query: str) -> bool:
+        normalized = re.sub(r"\s+", "", query or "")
+        if not normalized:
+            return False
+        if not HandlerLLM._has_tool_schema(context, "web_search"):
+            return False
+        if HandlerLLM._should_inject_local_time(normalized):
+            return False
+        if getattr(context, "web_search_always", False):
+            return True
+
+        normalized_lower = normalized.lower()
+        explicit_search_terms = (
+            "搜索",
+            "搜一下",
+            "帮我搜",
+            "查一下",
+            "帮我查",
+            "查查",
+            "查询",
+            "联网",
+            "上网查",
+        )
+        if any(term in normalized for term in explicit_search_terms):
+            return True
+
+        weather_terms = (
+            "天气",
+            "气温",
+            "温度",
+            "降雨",
+            "下雨",
+            "空气质量",
+            "aqi",
+            "台风",
+            "高温",
+            "冷不冷",
+            "热不热",
+        )
+        if any(term in normalized_lower for term in weather_terms):
+            return True
+
+        current_terms = (
+            "最新",
+            "最近",
+            "今天",
+            "昨天",
+            "明天",
+            "现在",
+            "当前",
+            "实时",
+            "刚刚",
+            "新闻",
+            "消息",
+            "预报",
+            "结果",
+            "赛果",
+            "比分",
+            "赛程",
+        )
+        sports_terms = (
+            "世界杯",
+            "比赛",
+            "球赛",
+            "赛果",
+            "比分",
+            "赛程",
+            "足球",
+            "篮球",
+            "nba",
+            "中超",
+            "欧冠",
+            "英超",
+            "西甲",
+            "网球",
+            "乒乓",
+        )
+        if (
+            any(term in normalized_lower for term in sports_terms)
+            and any(term in normalized_lower for term in current_terms)
+        ):
+            return True
+
+        live_info_terms = (
+            "新闻",
+            "热搜",
+            "政策",
+            "价格",
+            "股价",
+            "汇率",
+            "票价",
+            "路况",
+            "航班",
+            "火车",
+            "高铁",
+            "活动",
+            "直播",
+            "地震",
+        )
+        if (
+            any(term in normalized_lower for term in live_info_terms)
+            and any(term in normalized_lower for term in current_terms)
+        ):
+            return True
+
+        return False
 
     @staticmethod
     def _stream_completion_response(
@@ -1015,6 +1209,69 @@ class HandlerLLM(HandlerBase, ABC):
         return ready
 
     @staticmethod
+    def _should_skip_tool_feedback_response(context: LLMContext) -> bool:
+        for result in getattr(context, "tool_execution_results", []) or []:
+            if not result.get("success"):
+                continue
+            data = result.get("data") or {}
+            if result.get("name") == "music_control" or data.get("type") == "music.control":
+                if data.get("action") == "stop":
+                    return True
+        return False
+
+    @staticmethod
+    def _run_tool_feedback_response(
+        context: LLMContext,
+        output_definition,
+        streamer,
+        stream_key: Optional[str],
+        turn_id: Optional[str],
+    ) -> Tuple[str, bool]:
+        kwargs = getattr(context, "tool_feedback_completion_kwargs", None)
+        if not kwargs:
+            logger.warning("Tool feedback response requested without completion kwargs")
+            return "", False
+
+        audit_event(
+            context,
+            "llm_tool_feedback_input",
+            stream_key=stream_key,
+            turn_id=turn_id,
+            llm_stage="tool_feedback",
+            model=context.model_name,
+            messages=kwargs.get("messages", []),
+            has_tools="tools" in kwargs,
+            has_tool_choice="tool_choice" in kwargs,
+        )
+        completion = context.client.chat.completions.create(**kwargs)
+        full_text, feedback_tool_calls, cancelled = HandlerLLM._stream_completion_response(
+            context,
+            completion,
+            output_definition,
+            streamer,
+            stream_key,
+        )
+        if feedback_tool_calls:
+            logger.warning(
+                "Tool feedback response returned unexpected tool_calls; "
+                f"ignoring {len(feedback_tool_calls)} call(s) in this phase"
+            )
+        audit_event(
+            context,
+            "llm_tool_feedback_output",
+            stream_key=stream_key,
+            turn_id=turn_id,
+            llm_stage="tool_feedback",
+            model=context.model_name,
+            output_text=full_text,
+            success=not cancelled,
+            cancelled=cancelled,
+            unexpected_tool_call_count=len(feedback_tool_calls),
+            unexpected_tool_calls=feedback_tool_calls,
+        )
+        return full_text, cancelled
+
+    @staticmethod
     def _dispatch_music_tool_results(
         context: LLMContext,
         tool_execution_results: List[dict],
@@ -1115,6 +1372,7 @@ class HandlerLLM(HandlerBase, ABC):
         stream_key: Optional[str],
         turn_id: Optional[str],
         original_text: str = "",
+        emit_empty_fallback: bool = True,
     ) -> None:
         if not tool_calls:
             return
@@ -1183,7 +1441,7 @@ class HandlerLLM(HandlerBase, ABC):
                 executed=True,
                 tool_side_effect_dispatched=tool_side_effect_dispatched,
             )
-        if context.output_texts:
+        if context.output_texts or not emit_empty_fallback:
             return
 
         fallback = (
@@ -1323,22 +1581,24 @@ class HandlerLLM(HandlerBase, ABC):
         }
 
 
-    def _build_local_time_context(self, context: LLMContext, query: str) -> Optional[dict]:
-        if not self._should_inject_local_time(query):
-            return None
-
+    def _build_current_time_context(self, context: LLMContext) -> dict:
         now, timezone_label = self._get_local_now(context)
         weekday_cn = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
         weekday = weekday_cn[now.weekday()]
         content = "\n".join([
-            "以下是系统本地当前时间。用户询问当前时间、日期或星期时，必须优先使用这一信息，"
-            "不要使用联网搜索结果或模型记忆猜测。不要向用户提到这是内部注入。",
+            "以下是系统本地当前时间。回答任何涉及今天、明天、昨天、日期、星期、当前时间、天气日期或日程安排的问题时，必须优先使用这一信息。",
+            "不要使用联网搜索结果或模型记忆猜测当前日期时间。不要向用户提到这是内部注入。",
             f"本地时区: {timezone_label}",
             f"当前日期时间: {now.strftime('%Y-%m-%d %H:%M:%S')}",
             f"当前日期: {now.strftime('%Y年%m月%d日')}",
             f"星期: {weekday}",
         ])
         return {"role": "user", "content": content}
+
+    def _build_local_time_context(self, context: LLMContext, query: str) -> Optional[dict]:
+        if not self._should_inject_local_time(query):
+            return None
+        return self._build_current_time_context(context)
 
     @staticmethod
     def _should_inject_local_time(query: str) -> bool:
