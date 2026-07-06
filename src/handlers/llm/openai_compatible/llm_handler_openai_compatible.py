@@ -259,6 +259,8 @@ class LLMConfig(HandlerBaseConfigModel, BaseModel):
         default=_env_int("OPENAVATAR_EMOTIONAL_SUPPORT_HISTORY_TURNS", 4)
     )
     enable_tool_definitions: bool = Field(default=False)
+    enable_tool_execution: bool = Field(default=False)
+    enable_legacy_music_shortcuts: bool = Field(default=False)
     tool_modules: List[str] = Field(
         default_factory=lambda: [
             "handlers.agent.tools.demo_tools",
@@ -300,12 +302,16 @@ class LLMContext(HandlerContext):
         self.shared_states = None
         self.current_audit_turn_id = None
         self.enable_tool_definitions = False
+        self.enable_tool_execution = False
+        self.enable_legacy_music_shortcuts = False
         self.tool_choice = "auto"
         self.tool_registry = None
         self.tool_schemas = []
         self.last_tool_call_message = None
         self.last_tool_calls = []
         self.pending_tool_calls = []
+        self.tool_execution_results = []
+        self.pending_tool_result_messages = []
 
 
 class HandlerLLM(HandlerBase, ABC):
@@ -398,6 +404,8 @@ class HandlerLLM(HandlerBase, ABC):
             ),
         )
         context.enable_tool_definitions = handler_config.enable_tool_definitions
+        context.enable_tool_execution = handler_config.enable_tool_execution
+        context.enable_legacy_music_shortcuts = handler_config.enable_legacy_music_shortcuts
         context.tool_choice = handler_config.tool_choice
         if context.enable_tool_definitions:
             try:
@@ -426,6 +434,8 @@ class HandlerLLM(HandlerBase, ABC):
                 context.tool_registry = None
                 context.tool_schemas = []
                 logger.warning(f"LLM tool definitions failed to initialize: {e}")
+        if context.enable_tool_execution and not context.tool_registry:
+            logger.warning("LLM tool execution is enabled but no tool registry is available.")
         logger.info(f"LLM web search mode: {context.web_search_mode}")
         context.client =    OpenAI(  
             # 若没有配置 DEEPSEEK_API_KEY，可在配置文件中显式传入 api_key。
@@ -501,66 +511,67 @@ class HandlerLLM(HandlerBase, ABC):
             source="human_text",
         )
         context.current_audit_turn_id = turn_id
-        music_control = self._extract_music_control(chat_text)
-        if music_control:
-            logger.info(f"Music control detected: {music_control}")
-            audit_event(
-                context,
-                "llm_skipped",
-                stream_identity=inputs.stream_id,
-                bind_stream_key=stream_key,
-                turn_id=turn_id,
-                llm_stage="main_response",
-                reason="music_control",
-                user_text=chat_text,
-                control=music_control,
-            )
-            self._handle_music_control(
-                context,
-                music_control,
-                output_definition,
-                streamer,
-                stream_key,
-                chat_text,
-            )
-            return
-        if context.music_player_active:
-            logger.info(f"Music player active, ignore non-control ASR text: {chat_text}")
-            audit_event(
-                context,
-                "llm_skipped",
-                stream_identity=inputs.stream_id,
-                bind_stream_key=stream_key,
-                turn_id=turn_id,
-                llm_stage="main_response",
-                reason="music_player_active",
-                user_text=chat_text,
-            )
-            self._finish_empty_response(context, output_definition, streamer, stream_key)
-            return
-        music_query = self._extract_music_request(chat_text)
-        if music_query:
-            logger.info(f"Music request detected: {music_query}")
-            audit_event(
-                context,
-                "llm_skipped",
-                stream_identity=inputs.stream_id,
-                bind_stream_key=stream_key,
-                turn_id=turn_id,
-                llm_stage="main_response",
-                reason="music_request",
-                user_text=chat_text,
-                music_query=music_query,
-            )
-            self._handle_music_request(
-                context,
-                music_query,
-                output_definition,
-                streamer,
-                stream_key,
-                chat_text,
-            )
-            return
+        if context.enable_legacy_music_shortcuts:
+            music_control = self._extract_music_control(chat_text)
+            if music_control:
+                logger.info(f"Music control detected: {music_control}")
+                audit_event(
+                    context,
+                    "llm_skipped",
+                    stream_identity=inputs.stream_id,
+                    bind_stream_key=stream_key,
+                    turn_id=turn_id,
+                    llm_stage="main_response",
+                    reason="legacy_music_control",
+                    user_text=chat_text,
+                    control=music_control,
+                )
+                self._handle_music_control(
+                    context,
+                    music_control,
+                    output_definition,
+                    streamer,
+                    stream_key,
+                    chat_text,
+                )
+                return
+            if context.music_player_active:
+                logger.info(f"Music player active, ignore non-control ASR text: {chat_text}")
+                audit_event(
+                    context,
+                    "llm_skipped",
+                    stream_identity=inputs.stream_id,
+                    bind_stream_key=stream_key,
+                    turn_id=turn_id,
+                    llm_stage="main_response",
+                    reason="legacy_music_player_active",
+                    user_text=chat_text,
+                )
+                self._finish_empty_response(context, output_definition, streamer, stream_key)
+                return
+            music_query = self._extract_music_request(chat_text)
+            if music_query:
+                logger.info(f"Music request detected: {music_query}")
+                audit_event(
+                    context,
+                    "llm_skipped",
+                    stream_identity=inputs.stream_id,
+                    bind_stream_key=stream_key,
+                    turn_id=turn_id,
+                    llm_stage="main_response",
+                    reason="legacy_music_request",
+                    user_text=chat_text,
+                    music_query=music_query,
+                )
+                self._handle_music_request(
+                    context,
+                    music_query,
+                    output_definition,
+                    streamer,
+                    stream_key,
+                    chat_text,
+                )
+                return
         current_content = context.history.generate_next_messages(chat_text, 
                                                                  [context.current_image] if context.current_image is not None else [])
         logger.debug(f'llm input {context.model_name} {current_content} ')
@@ -582,20 +593,6 @@ class HandlerLLM(HandlerBase, ABC):
                 )
                 if support_context:
                     messages.append(support_context)
-            if context.web_search_mode == "bocha":
-                search_context = self._build_bocha_search_context(context, chat_text)
-                if search_context:
-                    messages.append({
-                        "role": "user",
-                        "content": search_context,
-                    })
-            local_time_context = self._build_local_time_context(context, chat_text)
-            if local_time_context:
-                messages.append(local_time_context)
-
-            if context.web_search_mode == "dashscope":
-                logger.warning("DashScope native search is unavailable for DeepSeek; continuing without provider-native search")
-
             create_kwargs = self._build_completion_kwargs(context, messages)
 
             audit_event(
@@ -622,7 +619,7 @@ class HandlerLLM(HandlerBase, ABC):
                 stream_key,
             )
             if not cancelled and tool_calls:
-                self._record_unexecuted_tool_calls(
+                self._handle_tool_calls(
                     context,
                     full_text,
                     tool_calls,
@@ -630,6 +627,7 @@ class HandlerLLM(HandlerBase, ABC):
                     streamer,
                     stream_key,
                     turn_id,
+                    chat_text,
                 )
             if not cancelled:
                 context.history.add_message(HistoryMessage(role="human", content=chat_text))
@@ -780,6 +778,8 @@ class HandlerLLM(HandlerBase, ABC):
         context.last_tool_call_message = None
         context.last_tool_calls = []
         context.pending_tool_calls = []
+        context.tool_execution_results = []
+        context.pending_tool_result_messages = []
 
     @staticmethod
     def _build_assistant_tool_call_message(full_text: str, tool_calls: List[dict]) -> Optional[dict]:
@@ -830,7 +830,157 @@ class HandlerLLM(HandlerBase, ABC):
         return pending
 
     @staticmethod
-    def _record_unexecuted_tool_calls(
+    def _execute_pending_tool_calls(context: LLMContext) -> List[dict]:
+        registry = getattr(context, "tool_registry", None)
+        results = []
+        for call in getattr(context, "pending_tool_calls", []) or []:
+            name = call.get("name", "")
+            parsed_args = call.get("parsed_args")
+            error = None
+            tool_result = None
+
+            if call.get("parse_error"):
+                error = f"Invalid tool arguments JSON: {call.get('parse_error')}"
+            elif registry is None:
+                error = "Tool registry is not initialized"
+            elif not call.get("known_tool"):
+                error = f"Unknown tool: {name}"
+            elif not isinstance(parsed_args, dict):
+                error = "Tool arguments must be a JSON object"
+            else:
+                tool_result = registry.execute(name, parsed_args)
+
+            if tool_result is None:
+                success = False
+                data = {}
+                content = json.dumps({"error": error or "Tool execution failed"}, ensure_ascii=False)
+            else:
+                success = bool(getattr(tool_result, "success", False))
+                data = getattr(tool_result, "data", {}) or {}
+                error = getattr(tool_result, "error", None)
+                try:
+                    content = tool_result.to_content_str()
+                except Exception as e:
+                    success = False
+                    error = f"Tool result serialization failed: {e}"
+                    content = json.dumps({"error": error}, ensure_ascii=False)
+
+            results.append({
+                "tool_call_id": call.get("id", ""),
+                "name": name,
+                "arguments": call.get("arguments", ""),
+                "parsed_args": parsed_args if isinstance(parsed_args, dict) else None,
+                "success": success,
+                "data": data,
+                "error": error,
+                "content": content,
+            })
+        return results
+
+    @staticmethod
+    def _build_tool_result_messages(tool_execution_results: List[dict]) -> List[dict]:
+        return [
+            {
+                "role": "tool",
+                "tool_call_id": result.get("tool_call_id", ""),
+                "content": result.get("content", ""),
+            }
+            for result in tool_execution_results
+        ]
+
+    @staticmethod
+    def _dispatch_music_tool_results(
+        context: LLMContext,
+        tool_execution_results: List[dict],
+        output_definition,
+        streamer,
+        stream_key: Optional[str],
+        original_text: str,
+    ) -> bool:
+        dispatched = False
+        for result in tool_execution_results:
+            if not result.get("success"):
+                continue
+            data = result.get("data") or {}
+            tool_name = result.get("name")
+            if tool_name == "music_control" or data.get("type") == "music.control":
+                action = data.get("action")
+                if not action:
+                    continue
+                if action == "stop":
+                    context.music_player_active = False
+                elif action in {"pause", "resume", "next", "volume", "mute", "unmute"}:
+                    context.music_player_active = True
+
+                output = DataBundle(output_definition)
+                output.set_main_data("")
+                output.add_meta("client_action", {
+                    "type": "music.control",
+                    "action": action,
+                    "delta": data.get("delta"),
+                    "hints": data.get("hints") or ["停止", "暂停", "继续", "下一首", "音量小一点"],
+                })
+                streamer.stream_data(output)
+                logger.info(
+                    f"Music client_action dispatch: type=music.control stream_key={stream_key} "
+                    f"action={action} delta={data.get('delta')} active={context.music_player_active} via=tool_call"
+                )
+                if action == "stop":
+                    context.emit_signal(
+                        ChatSignal(
+                            type=ChatSignalType.INTERRUPT,
+                            source_type=ChatSignalSourceType.HANDLER,
+                            source_name=context.owner or "LLMOpenAICompatible",
+                            signal_data={
+                                "reason": "music_stop",
+                                "trigger_text": (original_text or "")[:100],
+                            },
+                        )
+                    )
+                    logger.info("Music stop emitted interrupt from tool_call to clear pending avatar response streams")
+                if not context.output_texts:
+                    context.output_texts = f"music.control:{action}"
+                dispatched = True
+                continue
+
+            if tool_name == "music_request":
+                play_url = data.get("play_url") or ""
+                if not play_url:
+                    continue
+                selected = data.get("selected") or {}
+                song_title = selected.get("title") or selected.get("name") or data.get("query") or ""
+                artist = selected.get("artist") or ""
+                if not artist and isinstance(selected.get("artists"), list):
+                    artist = " / ".join(selected.get("artists") or [])
+                source = data.get("source") or ""
+                candidates = data.get("candidates") or []
+
+                context.music_player_active = True
+                output = DataBundle(output_definition)
+                output.set_main_data("")
+                output.add_meta("client_action", {
+                    "type": "music.play",
+                    "title": song_title,
+                    "artist": artist,
+                    "url": play_url,
+                    "source": source,
+                    "query": data.get("query") or "",
+                    "candidates": candidates,
+                    "hints": ["停止", "暂停", "继续", "下一首", "音量小一点"],
+                })
+                streamer.stream_data(output)
+                logger.info(
+                    f"Music client_action dispatch: type=music.play stream_key={stream_key} "
+                    f"title={song_title!r} artist={artist!r} source={source or '-'} "
+                    f"url={_summarize_url_for_log(play_url)} via=tool_call"
+                )
+                if not context.output_texts:
+                    context.output_texts = data.get("message") or f"正在播放《{song_title}》"
+                dispatched = True
+        return dispatched
+
+    @staticmethod
+    def _handle_tool_calls(
         context: LLMContext,
         full_text: str,
         tool_calls: List[dict],
@@ -838,6 +988,7 @@ class HandlerLLM(HandlerBase, ABC):
         streamer,
         stream_key: Optional[str],
         turn_id: Optional[str],
+        original_text: str = "",
     ) -> None:
         if not tool_calls:
             return
@@ -849,10 +1000,33 @@ class HandlerLLM(HandlerBase, ABC):
         context.last_tool_call_message = assistant_tool_call_message
         context.pending_tool_calls = pending_tool_calls
 
-        logger.info(
-            "LLM returned tool_calls but execution is not enabled in this phase: "
-            f"{tool_calls}"
-        )
+        executed = bool(context.enable_tool_execution)
+        tool_side_effect_dispatched = False
+        if executed:
+            context.tool_execution_results = HandlerLLM._execute_pending_tool_calls(context)
+            context.pending_tool_result_messages = HandlerLLM._build_tool_result_messages(
+                context.tool_execution_results
+            )
+            tool_side_effect_dispatched = HandlerLLM._dispatch_music_tool_results(
+                context,
+                context.tool_execution_results,
+                output_definition,
+                streamer,
+                stream_key,
+                original_text,
+            )
+            logger.info(
+                "LLM tool_calls executed: "
+                f"{len(context.tool_execution_results)} results for {tool_calls}"
+            )
+        else:
+            context.tool_execution_results = []
+            context.pending_tool_result_messages = []
+            logger.info(
+                "LLM returned tool_calls but tool execution is disabled: "
+                f"{tool_calls}"
+            )
+
         audit_event(
             context,
             "llm_tool_calls",
@@ -864,12 +1038,32 @@ class HandlerLLM(HandlerBase, ABC):
             assistant_tool_call_message=assistant_tool_call_message,
             pending_tool_calls=pending_tool_calls,
             tool_call_count=len(tool_calls),
-            executed=False,
+            executed=executed,
+            tool_side_effect_dispatched=tool_side_effect_dispatched,
         )
+        if executed:
+            audit_event(
+                context,
+                "llm_tool_execution",
+                stream_key=stream_key,
+                turn_id=turn_id,
+                llm_stage="main_response",
+                model=context.model_name,
+                tool_execution_results=context.tool_execution_results,
+                pending_tool_result_messages=context.pending_tool_result_messages,
+                tool_call_count=len(pending_tool_calls),
+                result_count=len(context.tool_execution_results),
+                executed=True,
+                tool_side_effect_dispatched=tool_side_effect_dispatched,
+            )
         if context.output_texts:
             return
 
-        fallback = "我需要调用工具确认一下，这一步还在接入中。"
+        fallback = (
+            "我已经调用工具确认了，这一步的结果回传还在接入中。"
+            if executed else
+            "我需要调用工具确认一下，这一步还在接入中。"
+        )
         context.output_texts = fallback
         output = DataBundle(output_definition)
         output.set_main_data(fallback)

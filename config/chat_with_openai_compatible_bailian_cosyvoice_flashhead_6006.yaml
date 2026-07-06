@@ -109,8 +109,8 @@ default:
         scopemem_extract_batch_size: 8
         scopemem_clear_on_start: False  # 李思江2026.07.05关闭
         api_url: "https://api.deepseek.com"
-        web_search_mode: "bocha"  # off | dashscope | bocha，可由 start_realtime_human.sh 覆盖
-        web_search_always: true
+        web_search_mode: "off"  # legacy prompt injection disabled; use web_search tool call
+        web_search_always: false
         web_search_timeout: 3.0
         web_search_result_limit: 3         #王春昂2026/7/6 11:24由5改为3
         enable_emotional_support_skills: true
@@ -118,6 +118,8 @@ default:
         emotional_support_max_chars: 1800
         emotional_support_history_turns: 4
         enable_tool_definitions: true
+        enable_tool_execution: true
+        enable_legacy_music_shortcuts: false
         tool_modules:
           - "handlers.agent.tools.demo_tools"
           - "handlers.agent.tools.web_search"
