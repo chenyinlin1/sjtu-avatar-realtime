@@ -579,6 +579,7 @@ class HandlerLLM(HandlerBase, ABC):
         if stream_key:
             context.active_stream_keys.add(stream_key)
         cancelled = False
+        tool_trace = self._new_tool_trace_record(context, chat_text)
         try:
             messages = [
                 self._system_prompt_for_context(context),
@@ -623,6 +624,8 @@ class HandlerLLM(HandlerBase, ABC):
                 streamer,
                 stream_key,
             )
+            tool_trace["llm_need_tool"] = bool(tool_calls)
+            tool_trace["tool_calls"] = self._clean_trace_tool_calls(tool_calls)
             if (
                 not cancelled
                 and not tool_calls
@@ -656,13 +659,17 @@ class HandlerLLM(HandlerBase, ABC):
                     chat_text,
                     emit_empty_fallback=False,
                 )
+                tool_trace["tool_success"] = self._clean_trace_tool_success(context)
+                tool_trace["tool_result"] = self._clean_trace_tool_results(context)
                 feedback_ready = self._prepare_tool_feedback_request(
                     context,
                     messages,
                     stream_key,
                     turn_id,
                 )
-                if feedback_ready and not self._should_skip_tool_feedback_response(context):
+                skip_feedback = self._should_skip_tool_feedback_response(context)
+                tool_trace["delivered_to_reply_generation"] = False
+                if feedback_ready and not skip_feedback:
                     context.output_texts = ''
                     _feedback_text, cancelled = self._run_tool_feedback_response(
                         context,
@@ -671,6 +678,7 @@ class HandlerLLM(HandlerBase, ABC):
                         stream_key,
                         turn_id,
                     )
+                    tool_trace["delivered_to_reply_generation"] = not cancelled
                     if not cancelled and not context.output_texts:
                         fallback = "我处理好了。"
                         context.output_texts = fallback
@@ -738,6 +746,9 @@ class HandlerLLM(HandlerBase, ABC):
             output = DataBundle(output_definition)
             output.set_main_data(error_text)
             streamer.stream_data(output, finish_stream=True)
+        if tool_trace["llm_need_tool"] is None:
+            tool_trace["llm_need_tool"] = False
+        self._write_tool_trace_record(context, tool_trace)
         context.input_texts = ''
         context.output_texts = ''
         context.current_audit_turn_id = None
@@ -748,6 +759,82 @@ class HandlerLLM(HandlerBase, ABC):
         end_output = DataBundle(output_definition)
         end_output.set_main_data('')
         streamer.stream_data(end_output, finish_stream=True)
+
+
+    @staticmethod
+    def _new_tool_trace_record(context: LLMContext, user_text: str) -> dict:
+        now, _timezone_label = HandlerLLM._get_local_now(context)
+        return {
+            "time": now.isoformat(timespec="seconds"),
+            "user_content": user_text or "",
+            "llm_need_tool": None,
+            "tool_calls": [],
+            "tool_success": None,
+            "tool_result": [],
+            "delivered_to_reply_generation": None,
+        }
+
+    @staticmethod
+    def _clean_trace_tool_calls(tool_calls: List[dict]) -> List[dict]:
+        cleaned = []
+        for call in tool_calls or []:
+            cleaned.append({
+                "name": call.get("name", ""),
+                "arguments": HandlerLLM._parse_trace_arguments(call.get("arguments", "")),
+            })
+        return cleaned
+
+    @staticmethod
+    def _parse_trace_arguments(arguments):
+        if isinstance(arguments, str):
+            if not arguments.strip():
+                return {}
+            try:
+                return HandlerLLM._json_safe(json.loads(arguments))
+            except json.JSONDecodeError:
+                return arguments
+        return HandlerLLM._json_safe(arguments or {})
+
+    @staticmethod
+    def _clean_trace_tool_success(context: LLMContext):
+        results = getattr(context, "tool_execution_results", []) or []
+        if not results:
+            return False
+        return all(bool(result.get("success")) for result in results)
+
+    @staticmethod
+    def _clean_trace_tool_results(context: LLMContext) -> List[dict]:
+        cleaned = []
+        for result in getattr(context, "tool_execution_results", []) or []:
+            cleaned.append({
+                "name": result.get("name", ""),
+                "success": bool(result.get("success")),
+                "result": HandlerLLM._json_safe(result.get("data") or {}),
+                "error": result.get("error"),
+            })
+        return cleaned
+
+    @staticmethod
+    def _write_tool_trace_record(context: LLMContext, record: dict) -> None:
+        try:
+            log_dir = os.getenv("OPENAVATAR_FUNCTION_CALL_TRACE_DIR")
+            if not log_dir:
+                project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../.."))
+                log_dir = os.path.join(project_root, "logs", "search_logs")
+            os.makedirs(log_dir, exist_ok=True)
+            now, _timezone_label = HandlerLLM._get_local_now(context)
+            path = os.path.join(log_dir, f"function_call_trace_{now.strftime('%Y%m%d')}.jsonl")
+            with open(path, "a", encoding="utf-8") as file:
+                file.write(json.dumps(HandlerLLM._json_safe(record), ensure_ascii=False, separators=(",", ":")) + "\n")
+        except Exception as e:
+            logger.warning(f"Function call trace write failed: {e}")
+
+    @staticmethod
+    def _json_safe(value):
+        try:
+            return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+        except Exception:
+            return str(value)
 
 
     @staticmethod
