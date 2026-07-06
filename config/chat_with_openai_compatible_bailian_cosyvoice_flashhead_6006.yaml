@@ -110,9 +110,9 @@ default:
         scopemem_clear_on_start: False  # 李思江2026.07.05关闭
         api_url: "https://api.deepseek.com"
         web_search_mode: "bocha"  # off | dashscope | bocha，可由 start_realtime_human.sh 覆盖
-        web_search_always: false
+        web_search_always: true
         web_search_timeout: 3.0
-        web_search_result_limit: 5
+        web_search_result_limit: 3         #王春昂2026/7/6 11:24由5改为3
         enable_emotional_support_skills: true
         emotional_support_skill_bank_dir: "esc_skill_bank_agent_package/skill_bank"
         emotional_support_max_chars: 1800

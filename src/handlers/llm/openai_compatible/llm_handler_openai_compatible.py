@@ -1,5 +1,5 @@
 
-
+import json
 import os
 import re
 from datetime import datetime
@@ -84,7 +84,7 @@ def _summarize_url_for_log(url: str) -> str:
 
 
 XIAOBAN_SYSTEM_PROMPT = r"""
-你是陪伴音箱“灵心小伴”中的 AI 助手，名字叫小伴。你服务于四川省自贡市及周边地区六十岁以上的老年用户，核心职责是情感陪伴、日常问候、健康提醒、紧急求助协助。
+    你是陪伴音箱“灵心小伴”中的 AI 助手，名字叫小伴。你服务于四川省自贡市及周边地区六十岁以上的老年用户，核心职责是情感陪伴、日常问候、健康提醒、紧急求助协助。
 
 你不是真人，也绝不假装是真人。当老人问起身份时，要温和说明自己是音箱里的 AI 助手，但强调你一直在陪着老人。
 
@@ -847,6 +847,14 @@ class HandlerLLM(HandlerBase, ABC):
             )
         except Exception as e:
             logger.warning(f"Bocha web search failed: {e}")
+            self._record_search_call_if_enabled(
+                context,
+                query=query,
+                results=[],
+                formatted="",
+                success=False,
+                error=str(e),
+            )
             audit_event(
                 context,
                 "search_operation",
@@ -863,6 +871,13 @@ class HandlerLLM(HandlerBase, ABC):
             for result in results
         ]
         formatted = format_search_results(results)
+        self._record_search_call_if_enabled(
+            context,
+            query=query,
+            results=result_items,
+            formatted=formatted,
+            success=True,
+        )
         audit_event(
             context,
             "search_operation",
@@ -882,6 +897,43 @@ class HandlerLLM(HandlerBase, ABC):
             "回答中可以简短提及来源。\n\n"
             f"{formatted}"
         )
+
+    def _record_search_call_if_enabled(
+        self,
+        context: LLMContext,
+        *,
+        query: str,
+        results,
+        formatted: str,
+        success: bool,
+        error: Optional[str] = None,
+    ) -> None:
+        log_path = os.getenv("OPENAVATAR_SEARCH_CALL_LOG")
+        if not log_path:
+            return
+        try:
+            log_dir = os.path.dirname(log_path)
+            if log_dir:
+                os.makedirs(log_dir, exist_ok=True)
+            conversation_time, timezone_label = self._get_local_now(context)
+            record = {
+                "schema": "openavatarchat.search_call.v1",
+                "conversation_time": conversation_time.isoformat(),
+                "conversation_timezone": timezone_label,
+                "recorded_at": datetime.now().astimezone().isoformat(),
+                "session_id": getattr(context, "session_id", None),
+                "turn_id": getattr(context, "current_audit_turn_id", None),
+                "query": query,
+                "success": success,
+                "results": results,
+                "formatted_results": formatted,
+            }
+            if error:
+                record["error"] = error
+            with open(log_path, "a", encoding="utf-8") as file:
+                file.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+        except Exception as e:
+            logger.warning(f"Search call log write failed: {e}")
 
     def _should_search(self, context: LLMContext, query: str) -> bool:
         if context.web_search_always:
