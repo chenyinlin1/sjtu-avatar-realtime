@@ -288,7 +288,7 @@ class ChatStream:
         for ancestor_id in reversed(self.cancelable_ancestors):
             ancestor_stream = storage.find_stream(ancestor_id)
             if ancestor_stream is not None:
-                if ancestor_stream.status in (ChatStreamStatus.NOT_STARTED, ChatStreamStatus.STARTED):
+                if ancestor_stream.status != ChatStreamStatus.CANCELLED:
                     if ancestor_stream.cancel(storage):
                         cancelled.append(ancestor_id)
         # Cancel self if cancelable

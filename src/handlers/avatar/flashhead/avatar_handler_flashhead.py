@@ -54,6 +54,7 @@ class FlashHeadContext(HandlerContext):
         self.output_data_definitions: Dict[ChatDataType, DataBundleDefinition] = {}
 
         self._current_tts_stream_key: Optional[str] = None
+        self._interrupted_tts_stream_keys = set()
         self._stream_key_lock = threading.Lock()
         self._playback_streamer = None
         self.shared_states = None
@@ -161,6 +162,8 @@ class FlashHeadContext(HandlerContext):
         """
         logger.info("FlashHead interrupt: notifying processor")
         with self._stream_key_lock:
+            if self._current_tts_stream_key:
+                self._interrupted_tts_stream_keys.add(self._current_tts_stream_key)
             self._current_tts_stream_key = None
         if self.processor is not None:
             self.processor.interrupt()
@@ -437,15 +440,21 @@ class HandlerAvatarFlashHead(HandlerBase):
         if inputs.type != ChatDataType.AVATAR_AUDIO:
             return
         context = cast(FlashHeadContext, context)
-        self._apply_runtime_condition_image(context)
 
         # --- Track TTS AVATAR_AUDIO stream via CLIENT_PLAYBACK lifecycle streams ---
         stream_key_str = inputs.stream_id.stream_key_str if inputs.stream_id else None
         with context._stream_key_lock:
+            if stream_key_str and stream_key_str in context._interrupted_tts_stream_keys:
+                logger.info(
+                    f"FlashHead: drop interrupted TTS audio residue, stream_key={stream_key_str}"
+                )
+                return
             prev_key = context._current_tts_stream_key
             need_switch = bool(stream_key_str and stream_key_str != prev_key)
             if need_switch:
                 context._current_tts_stream_key = stream_key_str
+
+        self._apply_runtime_condition_image(context)
 
         if need_switch:
             # Reset processor interrupt state for new speech
