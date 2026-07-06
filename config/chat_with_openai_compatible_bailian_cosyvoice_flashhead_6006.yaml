@@ -117,6 +117,14 @@ default:
         emotional_support_skill_bank_dir: "esc_skill_bank_agent_package/skill_bank"
         emotional_support_max_chars: 1800
         emotional_support_history_turns: 4
+        enable_tool_definitions: true
+        tool_modules:
+          - "handlers.agent.tools.demo_tools"
+          - "handlers.agent.tools.web_search"
+          - "handlers.agent.tools.music_request"
+          - "handlers.agent.tools.music_control"
+        tool_choice: "auto"
+        strict_tool_schema: false
         # bocha_api_key: "" # default=os.getenv("BOCHA_API_KEY")
         # api_key: "" # default=os.getenv("DEEPSEEK_API_KEY")
       # === FlashHead 数字人 Avatar (Lite 模式) ===

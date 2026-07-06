@@ -3,7 +3,7 @@ import json
 import os
 import re
 from datetime import datetime
-from typing import Dict, Optional, Set, cast
+from typing import Dict, List, Optional, Set, Tuple, cast
 from loguru import logger
 from urllib.parse import urlsplit
 from pydantic import BaseModel, Field
@@ -258,6 +258,17 @@ class LLMConfig(HandlerBaseConfigModel, BaseModel):
     emotional_support_history_turns: int = Field(
         default=_env_int("OPENAVATAR_EMOTIONAL_SUPPORT_HISTORY_TURNS", 4)
     )
+    enable_tool_definitions: bool = Field(default=False)
+    tool_modules: List[str] = Field(
+        default_factory=lambda: [
+            "handlers.agent.tools.demo_tools",
+            "handlers.agent.tools.web_search",
+            "handlers.agent.tools.music_request",
+            "handlers.agent.tools.music_control",
+        ]
+    )
+    tool_choice: str = Field(default="auto")
+    strict_tool_schema: bool = Field(default=False)
 
 
 class LLMContext(HandlerContext):
@@ -288,6 +299,13 @@ class LLMContext(HandlerContext):
         self.music_player_active = False
         self.shared_states = None
         self.current_audit_turn_id = None
+        self.enable_tool_definitions = False
+        self.tool_choice = "auto"
+        self.tool_registry = None
+        self.tool_schemas = []
+        self.last_tool_call_message = None
+        self.last_tool_calls = []
+        self.pending_tool_calls = []
 
 
 class HandlerLLM(HandlerBase, ABC):
@@ -379,6 +397,35 @@ class HandlerLLM(HandlerBase, ABC):
                 handler_config.emotional_support_history_turns,
             ),
         )
+        context.enable_tool_definitions = handler_config.enable_tool_definitions
+        context.tool_choice = handler_config.tool_choice
+        if context.enable_tool_definitions:
+            try:
+                from handlers.agent.tools.tool_loader import load_tool_modules
+                from handlers.agent.tools.tool_registry import ToolRegistry
+
+                context.tool_registry = ToolRegistry(
+                    strict_schema=handler_config.strict_tool_schema,
+                )
+                load_tool_modules(
+                    context.tool_registry,
+                    handler_config.tool_modules,
+                    config=handler_config,
+                    context=context,
+                )
+                context.tool_schemas = (
+                    context.tool_registry.get_schemas()
+                    if context.tool_registry.has_tools()
+                    else []
+                )
+                logger.info(
+                    "LLM tool definitions enabled: "
+                    f"{len(context.tool_schemas)} tools {context.tool_registry.tool_names}"
+                )
+            except Exception as e:
+                context.tool_registry = None
+                context.tool_schemas = []
+                logger.warning(f"LLM tool definitions failed to initialize: {e}")
         logger.info(f"LLM web search mode: {context.web_search_mode}")
         context.client =    OpenAI(  
             # 若没有配置 DEEPSEEK_API_KEY，可在配置文件中显式传入 api_key。
@@ -546,9 +593,10 @@ class HandlerLLM(HandlerBase, ABC):
             if local_time_context:
                 messages.append(local_time_context)
 
-            create_kwargs = {"extra_body": DEEPSEEK_DISABLE_THINKING_EXTRA_BODY}
             if context.web_search_mode == "dashscope":
                 logger.warning("DashScope native search is unavailable for DeepSeek; continuing without provider-native search")
+
+            create_kwargs = self._build_completion_kwargs(context, messages)
 
             audit_event(
                 context,
@@ -561,31 +609,28 @@ class HandlerLLM(HandlerBase, ABC):
                 messages=messages,
                 user_text=chat_text,
             )
-            completion = context.client.chat.completions.create(
-                model=context.model_name,
-                messages=messages,
-                stream=True,
-                stream_options={"include_usage": True},
-                **create_kwargs,
-            )
             context.current_image = None
             context.input_texts = ''
             context.output_texts = ''
-            for chunk in completion:
-                if stream_key and stream_key not in context.active_stream_keys:
-                        cancelled = True
-                        try:
-                            completion.close()
-                        except Exception:
-                            pass
-                        break
-                if (chunk and chunk.choices and chunk.choices[0] and chunk.choices[0].delta.content):
-                    output_text = chunk.choices[0].delta.content
-                    context.output_texts += output_text
-                    logger.info(output_text)
-                    output = DataBundle(output_definition)
-                    output.set_main_data(output_text)
-                    streamer.stream_data(output)
+            self._reset_tool_call_state(context)
+            completion = context.client.chat.completions.create(**create_kwargs)
+            full_text, tool_calls, cancelled = self._stream_completion_response(
+                context,
+                completion,
+                output_definition,
+                streamer,
+                stream_key,
+            )
+            if not cancelled and tool_calls:
+                self._record_unexecuted_tool_calls(
+                    context,
+                    full_text,
+                    tool_calls,
+                    output_definition,
+                    streamer,
+                    stream_key,
+                    turn_id,
+                )
             if not cancelled:
                 context.history.add_message(HistoryMessage(role="human", content=chat_text))
                 context.history.add_message(HistoryMessage(role="avatar", content=context.output_texts))
@@ -647,6 +692,188 @@ class HandlerLLM(HandlerBase, ABC):
         end_output = DataBundle(output_definition)
         end_output.set_main_data('')
         streamer.stream_data(end_output, finish_stream=True)
+
+
+    @staticmethod
+    def _build_completion_kwargs(context: LLMContext, messages: List[dict]) -> dict:
+        kwargs = {
+            "model": context.model_name,
+            "messages": messages,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+            "extra_body": DEEPSEEK_DISABLE_THINKING_EXTRA_BODY,
+        }
+        if context.enable_tool_definitions and context.tool_schemas:
+            kwargs["tools"] = context.tool_schemas
+            if context.tool_choice:
+                kwargs["tool_choice"] = context.tool_choice
+        return kwargs
+
+    @staticmethod
+    def _stream_completion_response(
+        context: LLMContext,
+        completion,
+        output_definition,
+        streamer,
+        stream_key: Optional[str],
+    ) -> Tuple[str, List[dict], bool]:
+        full_text = ""
+        tool_calls_accum: Dict[int, dict] = {}
+        cancelled = False
+
+        for chunk in completion:
+            if stream_key and stream_key not in context.active_stream_keys:
+                cancelled = True
+                try:
+                    completion.close()
+                except Exception:
+                    pass
+                break
+            if not chunk or not getattr(chunk, "choices", None):
+                continue
+
+            choice = chunk.choices[0] if chunk.choices else None
+            delta = getattr(choice, "delta", None)
+            if delta is None:
+                continue
+
+            output_text = getattr(delta, "content", None)
+            if output_text:
+                full_text += output_text
+                context.output_texts += output_text
+                logger.info(output_text)
+                output = DataBundle(output_definition)
+                output.set_main_data(output_text)
+                streamer.stream_data(output)
+
+            delta_tool_calls = getattr(delta, "tool_calls", None)
+            if delta_tool_calls:
+                for tc_delta in delta_tool_calls:
+                    idx = getattr(tc_delta, "index", 0)
+                    if idx not in tool_calls_accum:
+                        tool_calls_accum[idx] = {
+                            "id": "",
+                            "name": "",
+                            "arguments": "",
+                        }
+                    entry = tool_calls_accum[idx]
+                    tc_id = getattr(tc_delta, "id", None)
+                    if tc_id:
+                        entry["id"] = tc_id
+                    function = getattr(tc_delta, "function", None)
+                    if function:
+                        fn_name = getattr(function, "name", None)
+                        if fn_name:
+                            entry["name"] = fn_name
+                        fn_args = getattr(function, "arguments", None)
+                        if fn_args:
+                            entry["arguments"] += fn_args
+
+        tool_calls = [
+            tool_calls_accum[idx]
+            for idx in sorted(tool_calls_accum.keys())
+        ] if tool_calls_accum else []
+        return full_text, tool_calls, cancelled
+
+    @staticmethod
+    def _reset_tool_call_state(context: LLMContext) -> None:
+        context.last_tool_call_message = None
+        context.last_tool_calls = []
+        context.pending_tool_calls = []
+
+    @staticmethod
+    def _build_assistant_tool_call_message(full_text: str, tool_calls: List[dict]) -> Optional[dict]:
+        if not tool_calls:
+            return None
+        return {
+            "role": "assistant",
+            "content": full_text or None,
+            "tool_calls": [
+                {
+                    "id": tc.get("id", ""),
+                    "type": "function",
+                    "function": {
+                        "name": tc.get("name", ""),
+                        "arguments": tc.get("arguments", ""),
+                    },
+                }
+                for tc in tool_calls
+            ],
+        }
+
+    @staticmethod
+    def _prepare_pending_tool_calls(context: LLMContext, tool_calls: List[dict]) -> List[dict]:
+        pending = []
+        registry = getattr(context, "tool_registry", None)
+        for tc in tool_calls:
+            raw_args = tc.get("arguments") or ""
+            parsed_args = None
+            parse_error = None
+            if raw_args:
+                try:
+                    parsed_args = json.loads(raw_args)
+                except json.JSONDecodeError as e:
+                    parse_error = str(e)
+            else:
+                parsed_args = {}
+
+            name = tc.get("name", "")
+            known_tool = bool(registry and registry.get(name))
+            pending.append({
+                "id": tc.get("id", ""),
+                "name": name,
+                "arguments": raw_args,
+                "parsed_args": parsed_args,
+                "parse_error": parse_error,
+                "known_tool": known_tool,
+            })
+        return pending
+
+    @staticmethod
+    def _record_unexecuted_tool_calls(
+        context: LLMContext,
+        full_text: str,
+        tool_calls: List[dict],
+        output_definition,
+        streamer,
+        stream_key: Optional[str],
+        turn_id: Optional[str],
+    ) -> None:
+        if not tool_calls:
+            return
+        assistant_tool_call_message = HandlerLLM._build_assistant_tool_call_message(
+            full_text, tool_calls
+        )
+        pending_tool_calls = HandlerLLM._prepare_pending_tool_calls(context, tool_calls)
+        context.last_tool_calls = tool_calls
+        context.last_tool_call_message = assistant_tool_call_message
+        context.pending_tool_calls = pending_tool_calls
+
+        logger.info(
+            "LLM returned tool_calls but execution is not enabled in this phase: "
+            f"{tool_calls}"
+        )
+        audit_event(
+            context,
+            "llm_tool_calls",
+            stream_key=stream_key,
+            turn_id=turn_id,
+            llm_stage="main_response",
+            model=context.model_name,
+            tool_calls=tool_calls,
+            assistant_tool_call_message=assistant_tool_call_message,
+            pending_tool_calls=pending_tool_calls,
+            tool_call_count=len(tool_calls),
+            executed=False,
+        )
+        if context.output_texts:
+            return
+
+        fallback = "我需要调用工具确认一下，这一步还在接入中。"
+        context.output_texts = fallback
+        output = DataBundle(output_definition)
+        output.set_main_data(fallback)
+        streamer.stream_data(output)
 
 
     @staticmethod
