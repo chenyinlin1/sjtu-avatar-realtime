@@ -534,6 +534,18 @@ class ClientHandlerRtc(ClientHandlerBase):
                 return handler
         return None
 
+    def _find_flashhead_handler_name(self) -> Optional[str]:
+        engine = self.handler_delegate.engine_ref() if self.handler_delegate.engine_ref else None
+        handler_manager = getattr(engine, "handler_manager", None)
+        if handler_manager is None:
+            return None
+        for registry in handler_manager.get_enabled_handler_registries(order_by_priority=False):
+            handler = getattr(registry, "handler", None)
+            if callable(getattr(handler, "update_condition_image", None)):
+                base_info = getattr(registry, "base_info", None)
+                return getattr(base_info, "name", None)
+        return None
+
     def _find_voice_clone_tts_handler(self):
         engine = self.handler_delegate.engine_ref() if self.handler_delegate.engine_ref else None
         handler_manager = getattr(engine, "handler_manager", None)
@@ -839,6 +851,21 @@ class ClientHandlerRtc(ClientHandlerBase):
             )
         return sent
 
+    def _should_forward_avatar_audio_to_client(self, inputs: ChatData) -> bool:
+        if inputs.type != ChatDataType.AVATAR_AUDIO:
+            return True
+        flashhead_handler_name = self._find_flashhead_handler_name()
+        if not flashhead_handler_name:
+            return True
+        producer_name = inputs.stream_id.producer_name if inputs.stream_id else None
+        if producer_name == flashhead_handler_name:
+            return True
+        logger.debug(
+            f"RTC dropped upstream AVATAR_AUDIO in FlashHead mode: "
+            f"producer={producer_name}, stream_id={inputs.stream_id}"
+        )
+        return False
+
     def handle(self, context: HandlerContext, inputs: ChatData,
                output_definitions: Dict[ChatDataType, HandlerDataInfo]):
         context = cast(ClientRtcContext, context)
@@ -847,6 +874,8 @@ class ClientHandlerRtc(ClientHandlerBase):
         if inputs.type.channel_type == EngineChannelType.TEXT:
             if not self._send_text_to_chat_channel(context, inputs):
                 logger.debug(f"Chat channel not ready for session {context.session_id}, skip text forwarding")
+            return
+        if not self._should_forward_avatar_audio_to_client(inputs):
             return
         data_queue = context.client_session_delegate.output_queues.get(inputs.type.channel_type)
         if data_queue is not None:

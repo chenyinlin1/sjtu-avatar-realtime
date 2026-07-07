@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEFAULT_PROJECT_DIR="/root/autodl-tmp/chatrobot_rebuild_workspace/OpenAvatarChat"
+DEFAULT_PROJECT_DIR="$SCRIPT_DIR"
 PROJECT_DIR="${PROJECT_DIR:-$DEFAULT_PROJECT_DIR}"
 PYTHON_BIN="${PYTHON_BIN:-/root/autodl-tmp/miniconda3/envs/openavatarchat/bin/python}"
 CONFIG_FILE="${CONFIG_FILE:-config/chat_with_openai_compatible_bailian_cosyvoice_flashhead_6006.yaml}"

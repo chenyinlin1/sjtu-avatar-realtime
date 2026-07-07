@@ -35,6 +35,13 @@ class TTSConfig(HandlerBaseConfigModel, BaseModel):
     api_key: str = Field(default=os.getenv("DASHSCOPE_API_KEY"), repr=False)
     model_name: str = Field(default="cosyvoice-1")
     instruction: Optional[str] = Field(default=None)
+    volume: int = Field(default=50)
+    speech_rate: float = Field(default=1.0)
+    pitch_rate: float = Field(default=1.0)
+    seed: int = Field(default=0)
+    synthesis_type: int = Field(default=0)
+    language_hints: Optional[list[str]] = Field(default=None)
+    additional_params: Optional[Dict] = Field(default=None)
 
 
 @dataclass
@@ -67,6 +74,7 @@ class TTSContext(HandlerContext):
         self.dump_audio = False
         self.audio_dump_file = None
         self.shared_states = None
+        self.failed_input_stream_keys: Set[StreamKey] = set()
 
     @classmethod
     def _create_session(cls, input_stream: ChatStreamIdentity) -> BailianTTSSession:
@@ -115,6 +123,13 @@ class TTSContext(HandlerContext):
         )
         return session
 
+    def _mark_session_failed(self, session: BailianTTSSession) -> None:
+        input_stream_key = session.input_stream_id.key
+        if input_stream_key is None:
+            return
+        self.failed_input_stream_keys.add(input_stream_key)
+        self.api_links.pop(input_stream_key, None)
+
     def _ensure_synthesizer(self, session: BailianTTSSession, handler: 'HandlerTTS'):
         if session.synthesizer is not None:
             return
@@ -143,9 +158,18 @@ class TTSContext(HandlerContext):
             "voice": voice,
             "callback": callback,
             "format": AudioFormat.PCM_24000HZ_MONO_16BIT,
+            "volume": handler.volume,
+            "speech_rate": handler.speech_rate,
+            "pitch_rate": handler.pitch_rate,
+            "seed": handler.seed,
+            "synthesis_type": handler.synthesis_type,
         }
         if instruction:
             synthesizer_kwargs["instruction"] = instruction
+        if handler.language_hints:
+            synthesizer_kwargs["language_hints"] = handler.language_hints
+        if handler.additional_params:
+            synthesizer_kwargs["additional_params"] = handler.additional_params
         session.synthesizer = SpeechSynthesizer(**synthesizer_kwargs)
 
     def _get_persona_runtime(self) -> Optional[Dict]:
@@ -162,6 +186,12 @@ class TTSContext(HandlerContext):
         if not has_text and self._has_client_action(data):
             logger.info("TTS: Skipping client_action-only avatar text")
             self._cancel_existing_sessions()
+            return
+
+        if input_stream_key in self.failed_input_stream_keys:
+            if text_end:
+                self.failed_input_stream_keys.discard(input_stream_key)
+            logger.warning(f"TTS: Skipping remaining chunks for failed input stream {input_stream_key}")
             return
 
         session = self.api_links.get(input_stream_key)
@@ -200,8 +230,8 @@ class TTSContext(HandlerContext):
                 success=False,
             )
             logger.error(e)
+            self._mark_session_failed(session)
             session.reset()
-            self.api_links.pop(input_stream_key, None)
 
 
 class HandlerTTS(HandlerBase, ABC):
@@ -216,6 +246,13 @@ class HandlerTTS(HandlerBase, ABC):
         self.model_name = None
         self.api_key = None
         self.instruction = None
+        self.volume = None
+        self.speech_rate = None
+        self.pitch_rate = None
+        self.seed = None
+        self.synthesis_type = None
+        self.language_hints = None
+        self.additional_params = None
         self.default_voice = None
         self.default_model_name = None
         self.default_instruction = None
@@ -255,6 +292,13 @@ class HandlerTTS(HandlerBase, ABC):
         self.ref_audio_text = config.ref_audio_text
         self.model_name = config.model_name
         self.instruction = config.instruction
+        self.volume = config.volume
+        self.speech_rate = config.speech_rate
+        self.pitch_rate = config.pitch_rate
+        self.seed = config.seed
+        self.synthesis_type = config.synthesis_type
+        self.language_hints = config.language_hints
+        self.additional_params = config.additional_params
         self.default_voice = config.voice
         self.default_model_name = config.model_name
         self.default_instruction = config.instruction
@@ -449,6 +493,8 @@ class CosyvoiceCallBack(ResultCallback):
         )
         logger.error(f'TTS: Service error: {message}')
         self._submit_end_frame()
+        self.context._mark_session_failed(self.session)
+        self.session.reset()
 
     def on_close(self) -> None:
         if self.is_cancelled:
