@@ -23,9 +23,13 @@ class MusicControlTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "音乐播放器控制工具。当用户说暂停、继续、停止播放、退出播放、"
-            "下一首、音量小一点、音量大一点、静音或取消静音时使用。工具只返回结构化控制动作，"
-            "实际播放由前端播放器执行。"
+            "音乐播放器控制工具。当用户想控制正在播放的音乐时使用，包括暂停、继续、停止、退出、"
+            "关闭、下一首、调节音量、静音或取消静音。用户语音转写文本可能不准确，"
+            "只要语义相近也应使用本工具，例如“停止播放、停止音乐、停下音乐、停一下音乐、"
+            "关掉音乐、关闭音乐、别放了、不听了、退出播放、停歌”，以及 ASR 可能误写成的"
+            "“停子播放、停子音乐、关止音乐”等。停止/关闭/退出/不听了等语义应传 action=stop；"
+            "暂停语义传 action=pause；继续/恢复/播放语义传 action=resume。"
+            "工具只返回结构化控制动作，实际播放由前端播放器执行。"
         )
 
     @property
@@ -36,7 +40,10 @@ class MusicControlTool(BaseTool):
                 "action": {
                     "type": "string",
                     "enum": ["pause", "resume", "stop", "next", "volume", "mute", "unmute"],
-                    "description": "播放器控制动作。",
+                    "description": (
+                        "播放器控制动作。停止、关闭、退出、不听了、别放了、停歌、停子播放、"
+                        "停子音乐、关止音乐等语义使用 stop；暂停使用 pause；继续、恢复、播放使用 resume。"
+                    ),
                 },
                 "delta": {
                     "type": "number",

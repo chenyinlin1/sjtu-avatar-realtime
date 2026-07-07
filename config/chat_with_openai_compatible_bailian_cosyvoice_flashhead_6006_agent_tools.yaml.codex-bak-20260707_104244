@@ -70,7 +70,7 @@ default:
         model_name: qwen-plus
         enable_interrupt_detection: true
         interrupt_on_any_speech: false
-        interrupt_on_speech_start: true
+        interrupt_on_speech_start: false
         min_text_length_for_interrupt: 2
         enable_completion_detection: false
         min_text_length_for_completion: 1

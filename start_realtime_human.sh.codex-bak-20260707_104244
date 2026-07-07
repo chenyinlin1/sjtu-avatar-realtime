@@ -23,9 +23,6 @@ esac
 PUBLIC_URL="${OPENAVATARCHAT_PUBLIC_URL:-$DEFAULT_PUBLIC_URL}"
 DEFAULT_DASHSCOPE_API_KEY="sk-ws-H.RXYHLIP.Kh4Y.MEQCIACbJPegvfSq5y2Yi-Yy5qAdT37KoSv49wJXl-PUdcq6AiASAFj4NE7M4bf02RZq_dNwCt9ZK8gPkBBmIK3a-4JWMA"
 DEFAULT_BOCHA_API_KEY="sk-b897bbc697594d8da78633e94513d08a"  # 可填入 Bocha API Key；外部 BOCHA_API_KEY 环境变量优先
-DEFAULT_QWEATHER_API_KEY="5db67b8888f84cda863710bb8719bb1b"  # 和风天气 API Key；外部 QWEATHER_API_KEY 环境变量优先
-DEFAULT_QWEATHER_API_HOST="ma4ewv4ac4.re.qweatherapi.com"  # 和风天气专属 API Host；外部 QWEATHER_API_HOST 环境变量优先
-WEATHER_PROVIDER="${WEATHER_PROVIDER:-qweather}"
 WEB_SEARCH_MODE="${OPENAVATAR_WEB_SEARCH_MODE:-bocha}"
 WEB_SEARCH_ALWAYS="${OPENAVATAR_WEB_SEARCH_ALWAYS:-true}"
 WEB_SEARCH_TIMEOUT="${OPENAVATAR_WEB_SEARCH_TIMEOUT:-3.0}"
@@ -55,14 +52,6 @@ Search options:
       Search request timeout. Default: 3.0.
   --web-search-result-limit N
       Max search results injected into the prompt. Default: 5.
-  --weather-provider auto|open-meteo|qweather
-      Weather provider. Default: qweather. Falls back to Open-Meteo if enabled.
-  --qweather-api-key KEY
-      Set QWEATHER_API_KEY for QWeather API key mode. Overrides DEFAULT_QWEATHER_API_KEY.
-  --qweather-api-host HOST
-      Set QWEATHER_API_HOST for current QWeather API host. Uses X-QW-Api-Key with API key mode.
-  --qweather-jwt-token TOKEN
-      Set QWEATHER_JWT_TOKEN for current QWeather Bearer auth.
 
 Default:
   Bocha web search is enabled for every user request unless overridden by
@@ -104,22 +93,6 @@ while [[ $# -gt 0 ]]; do
       WEB_SEARCH_RESULT_LIMIT="${2:-}"
       shift 2
       ;;
-    --weather-provider)
-      WEATHER_PROVIDER="${2:-}"
-      shift 2
-      ;;
-    --qweather-api-key)
-      export QWEATHER_API_KEY="${2:-}"
-      shift 2
-      ;;
-    --qweather-api-host)
-      export QWEATHER_API_HOST="${2:-}"
-      shift 2
-      ;;
-    --qweather-jwt-token)
-      export QWEATHER_JWT_TOKEN="${2:-}"
-      shift 2
-      ;;
     -h|--help)
       usage
       exit 0
@@ -140,23 +113,8 @@ case "$WEB_SEARCH_MODE" in
     ;;
 esac
 
-case "$WEATHER_PROVIDER" in
-  auto|open-meteo|open_meteo|qweather|heweather|hefeng) ;;
-  *)
-    echo "ERROR: --weather-provider must be one of: auto, open-meteo, qweather" >&2
-    exit 1
-    ;;
-esac
-
 if [[ -z "${BOCHA_API_KEY:-}" && -n "$DEFAULT_BOCHA_API_KEY" ]]; then
   export BOCHA_API_KEY="$DEFAULT_BOCHA_API_KEY"
-fi
-
-if [[ -z "${QWEATHER_API_KEY:-}" && -n "$DEFAULT_QWEATHER_API_KEY" ]]; then
-  export QWEATHER_API_KEY="$DEFAULT_QWEATHER_API_KEY"
-fi
-if [[ -z "${QWEATHER_API_HOST:-}" && -n "$DEFAULT_QWEATHER_API_HOST" ]]; then
-  export QWEATHER_API_HOST="$DEFAULT_QWEATHER_API_HOST"
 fi
 
 if [[ "$WEB_SEARCH_MODE" == "bocha" && -z "${BOCHA_API_KEY:-}" ]]; then
@@ -235,10 +193,6 @@ export OPENAVATAR_WEB_SEARCH_MODE="$WEB_SEARCH_MODE"
 export OPENAVATAR_WEB_SEARCH_ALWAYS="$WEB_SEARCH_ALWAYS"
 export OPENAVATAR_WEB_SEARCH_TIMEOUT="$WEB_SEARCH_TIMEOUT"
 export OPENAVATAR_WEB_SEARCH_RESULT_LIMIT="$WEB_SEARCH_RESULT_LIMIT"
-export WEATHER_PROVIDER
-export QWEATHER_API_KEY
-export QWEATHER_API_HOST="${QWEATHER_API_HOST:-}"
-export QWEATHER_JWT_TOKEN="${QWEATHER_JWT_TOKEN:-}"
 
 nohup setsid "$PYTHON_BIN" src/demo.py \
   --config "$CONFIG_FILE" \

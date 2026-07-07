@@ -24,7 +24,7 @@ class BochaWebSearchTool(BaseTool):
         default_count: int = 8,
         timeout: float = 15.0,
     ):
-        self._api_key = _clean_api_key(api_key or os.getenv("BOCHA_API_KEY") or os.getenv("BOCHAAI_API_KEY"))
+        self._api_key = api_key or os.getenv("BOCHA_API_KEY") or os.getenv("BOCHAAI_API_KEY")
         self._endpoint = endpoint or os.getenv("BOCHA_WEB_SEARCH_URL") or self.DEFAULT_ENDPOINT
         self._default_count = default_count
         self._timeout = timeout
@@ -146,13 +146,6 @@ class BochaWebSearchTool(BaseTool):
                 "results": results,
             },
         )
-
-
-def _clean_api_key(value: str | None) -> str:
-    if not value:
-        return ""
-    # Rich-text chat apps often wrap copied keys in smart quotes.
-    return str(value).strip().strip("'\"‘’“” ")
 
 
 def _coerce_int(value: Any, default: int) -> int:
