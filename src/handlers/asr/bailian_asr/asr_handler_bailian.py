@@ -36,6 +36,7 @@ class BailianASRConfig(HandlerBaseConfigModel, BaseModel):
     language_hints: Optional[List[str]] = Field(default=None)
     # WebSocket endpoint required by DashScope ASR SDK
     base_websocket_url: str = Field(default="wss://dashscope.aliyuncs.com/api-ws/v1/inference")
+    final_silence_padding_ms: int = Field(default=500)
 
 
 class BailianASRCallback(RecognitionCallback):
@@ -83,17 +84,34 @@ class BailianASRSession:
     input_stream_id: ChatStreamIdentity
     output_audios: list = field(default_factory=list)
     audio_slice_context: Optional[SliceContext] = None
+    callback: Optional[BailianASRCallback] = None
+    recognition: Optional[Recognition] = None
+    sent_sample_count: int = 0
 
     def __post_init__(self):
         self.audio_slice_context = SliceContext.create_numpy_slice_context(
-            slice_size=16000,
+            # 100ms at 16kHz; DashScope receives audio while the user is speaking.
+            slice_size=1600,
             slice_axis=0,
         )
 
+    def stop_recognition(self):
+        recognition = self.recognition
+        self.recognition = None
+        if recognition is None:
+            return
+        try:
+            recognition.stop()
+        except Exception as e:
+            logger.debug(f"BailianASR: recognition already stopped or failed to stop cleanly: {e}")
+
     def reset(self):
+        self.stop_recognition()
         if self.audio_slice_context is not None:
             self.audio_slice_context.flush()
         self.output_audios.clear()
+        self.callback = None
+        self.sent_sample_count = 0
 
 
 class BailianASRContext(HandlerContext):
@@ -114,52 +132,22 @@ class BailianASRContext(HandlerContext):
     def _create_session(cls, input_stream: ChatStreamIdentity) -> BailianASRSession:
         return BailianASRSession(input_stream_id=input_stream)
 
-    def handle_audio_stream(self, data: ChatData, handler: 'HandlerASR'):
-        input_stream = data.stream_id
-        input_stream_key = input_stream.key
-        session = self.api_links.get(input_stream_key)
-        if session is None:
-            session = self._create_session(input_stream)
-            self.api_links[input_stream_key] = session
+    @staticmethod
+    def _convert_audio_to_pcm_bytes(audio: np.ndarray) -> bytes:
+        audio_int16 = (audio * 32767).astype(np.int16)
+        return audio_int16.tobytes()
 
-        audio = data.data.get_main_data()
-        if audio is not None:
-            audio = audio.squeeze()
+    @staticmethod
+    def _normalize_audio(audio) -> np.ndarray:
+        audio = np.asarray(audio).squeeze()
+        if audio.ndim == 0:
+            audio = audio.reshape(1)
+        return audio
 
-            logger.info('audio in')
-            for audio_segment in slice_data(session.audio_slice_context, audio):
-                if audio_segment is None or audio_segment.shape[0] == 0:
-                    continue
-                session.output_audios.append(audio_segment)
-
-        if not data.is_last_data:
+    def _start_recognition_if_needed(self, session: BailianASRSession, handler: 'HandlerASR',
+                                     input_stream_key: StreamKey):
+        if session.recognition is not None:
             return
-
-        # Speech end: process accumulated audio for this stream
-
-        # prefill remainder audio in slice context
-        remainder_audio = session.audio_slice_context.flush()
-        if remainder_audio is not None:
-            if remainder_audio.shape[0] < session.audio_slice_context.slice_size:
-                remainder_audio = np.concatenate(
-                    [remainder_audio,
-                     np.zeros(shape=(session.audio_slice_context.slice_size - remainder_audio.shape[0]))])
-            session.output_audios.append(remainder_audio)
-
-        if len(session.output_audios) == 0:
-            self.api_links.pop(input_stream_key, None)
-            return
-
-        output_audio = np.concatenate(session.output_audios)
-        if self.audio_dump_file is not None:
-            logger.info('dump audio')
-            self.audio_dump_file.write(output_audio.tobytes())
-
-        session.output_audios.clear()
-
-        # Convert float32 audio to int16 PCM bytes for DashScope
-        audio_int16 = (output_audio * 32767).astype(np.int16)
-        audio_bytes = audio_int16.tobytes()
 
         callback = BailianASRCallback()
         recognition_kwargs = {
@@ -173,57 +161,112 @@ class BailianASRContext(HandlerContext):
             recognition_kwargs['language_hints'] = handler.language_hints
 
         recognition = Recognition(**recognition_kwargs)
+        session.callback = callback
+        session.recognition = recognition
+        recognition.start()
+        logger.info(f"BailianASR: streaming recognition started for {input_stream_key}")
 
+    def _send_audio_segment(self, session: BailianASRSession, audio_segment: np.ndarray,
+                            include_in_audit: bool = True):
+        if audio_segment is None or audio_segment.shape[0] == 0:
+            return
+        if session.recognition is None:
+            raise RuntimeError("BailianASR recognition is not started")
+
+        if include_in_audit:
+            session.output_audios.append(audio_segment)
+            session.sent_sample_count += int(audio_segment.shape[0])
+        session.recognition.send_audio_frame(
+            self._convert_audio_to_pcm_bytes(audio_segment)
+        )
+
+    def _send_final_silence_padding(self, session: BailianASRSession, handler: 'HandlerASR'):
+        padding_samples = int(handler.sample_rate * handler.final_silence_padding_ms / 1000)
+        if padding_samples <= 0:
+            return
+        silence = np.zeros(shape=(padding_samples,), dtype=np.float32)
+        self._send_audio_segment(session, silence, include_in_audit=False)
+
+    def _emit_error_text(self, session: BailianASRSession, input_stream_key: StreamKey, error_message: str):
+        output_streamer = None
+        if self.data_submitter is not None:
+            output_streamer = self.data_submitter.get_streamer(ChatDataType.HUMAN_TEXT)
+        if output_streamer is None:
+            logger.warning(f"BailianASR: No HUMAN_TEXT streamer for error on {input_stream_key}")
+            return
         try:
-            recognition.start()
+            output_streamer.new_stream([session.input_stream_id])
+            if output_streamer.current_stream is not None:
+                error_data = DataBundle(output_streamer.data_definition)
+                error_data.set_main_data("")
+                error_data.add_meta("human_text_end", True)
+                error_data.add_meta("error", True)
+                error_data.add_meta("error_message", error_message[:200])
+                output_streamer.stream_data(error_data, finish_stream=True)
+                logger.info(f"BailianASR: Finished output stream on error for {input_stream_key}")
+        except Exception as e:
+            logger.warning(f"BailianASR: Failed to finish output stream on error: {e}")
 
-            # Send audio in ~100ms chunks (3200 bytes = 1600 int16 samples = 100ms at 16kHz)
-            chunk_size = 3200
-            for offset in range(0, len(audio_bytes), chunk_size):
-                recognition.send_audio_frame(audio_bytes[offset:offset + chunk_size])
+    @staticmethod
+    def _log_recognition_metrics(recognition: Recognition):
+        try:
+            logger.info(
+                '[Metric] requestId: {}, first package delay ms: {}, last package delay ms: {}'
+                .format(
+                    recognition.get_last_request_id(),
+                    recognition.get_first_package_delay(),
+                    recognition.get_last_package_delay(),
+                ))
+        except Exception as e:
+            logger.debug(f"BailianASR: Failed to log recognition metrics: {e}")
 
-            recognition.stop()
+    def _finish_recognition_session(self, input_stream_key: StreamKey, session: BailianASRSession,
+                                    handler: 'HandlerASR'):
+        if session.recognition is None or session.callback is None:
+            self.api_links.pop(input_stream_key, None)
+            return
 
-            # Wait for callback completion with timeout
+        output_audio = np.concatenate(session.output_audios) if session.output_audios else None
+        if output_audio is not None and self.audio_dump_file is not None:
+            logger.info('dump audio')
+            self.audio_dump_file.write(output_audio.tobytes())
+
+        recognition = session.recognition
+        callback = session.callback
+        session.recognition = None
+        try:
+            try:
+                recognition.stop()
+            except Exception as e:
+                logger.error(f"BailianASR recognition stop exception: {e}")
+                self._emit_error_text(session, input_stream_key, str(e))
+                return
+
             callback.completed.wait(timeout=30)
 
             if callback.error_message:
                 logger.error(f"BailianASR recognition error: {callback.error_message}")
-                # 关闭 output stream，通知下游（如果有活跃的 stream）
-                output_streamer = self.data_submitter.get_streamer(ChatDataType.HUMAN_TEXT)
-                if output_streamer is not None:
-                    try:
-                        output_streamer.new_stream([session.input_stream_id])
-                        if output_streamer.current_stream is not None:
-                            error_data = DataBundle(output_streamer.data_definition)
-                            error_data.set_main_data("")
-                            error_data.add_meta("human_text_end", True)
-                            error_data.add_meta("error", True)
-                            error_data.add_meta("error_message", callback.error_message[:200])
-                            output_streamer.stream_data(error_data, finish_stream=True)
-                            logger.info(f"BailianASR: Finished output stream on error for {input_stream_key}")
-                    except Exception as e:
-                        logger.warning(f"BailianASR: Failed to finish output stream on error: {e}")
-                self.api_links.pop(input_stream_key, None)
+                self._emit_error_text(session, input_stream_key, callback.error_message)
                 return
 
             output_text = callback.get_full_text()
             logger.info(f"BailianASR result: {output_text}")
 
             if len(output_text) == 0:
-                self.api_links.pop(input_stream_key, None)
                 return
 
-            # Use streamer with explicit source stream linkage for 1:1 mapping
-            output_streamer = self.data_submitter.get_streamer(ChatDataType.HUMAN_TEXT)
-            # 明确指定只使用当前 session 的 input stream 作为唯一的 source
-            # 这确保 1:1 的对应关系，避免关联到多个（包括已被 cancel 的）input streams
+            output_streamer = None
+            if self.data_submitter is not None:
+                output_streamer = self.data_submitter.get_streamer(ChatDataType.HUMAN_TEXT)
+            if output_streamer is None:
+                logger.warning(f"BailianASR: No HUMAN_TEXT streamer for {input_stream_key}")
+                return
+
+            # Use streamer with explicit source stream linkage for 1:1 mapping.
             output_streamer.new_stream([session.input_stream_id])
 
-            # 检查 stream 是否被 auto-cancel（因为 parent 被 cancel）
             if output_streamer.current_stream is None:
                 logger.info(f"BailianASR: Output stream was auto-cancelled for {input_stream_key}, skipping output")
-                self.api_links.pop(input_stream_key, None)
                 return
 
             output_stream_key = output_streamer.current_stream.identity.stream_key_str
@@ -237,7 +280,7 @@ class BailianASRContext(HandlerContext):
                 model=handler.model_name,
                 transcript=output_text,
                 success=True,
-                audio_samples=int(output_audio.shape[0]),
+                audio_samples=session.sent_sample_count,
                 audio_dump_path=getattr(self.audio_dump_file, "name", None),
             )
             output = DataBundle(output_streamer.data_definition)
@@ -247,17 +290,65 @@ class BailianASRContext(HandlerContext):
             output_streamer.stream_data(output, finish_stream=True)
         except Exception as e:
             logger.error(f"BailianASR recognition exception: {e}")
+        finally:
+            self._log_recognition_metrics(recognition)
+            session.reset()
+            self.api_links.pop(input_stream_key, None)
 
-        logger.info(
-            '[Metric] requestId: {}, first package delay ms: {}, last package delay ms: {}'
-            .format(
-                recognition.get_last_request_id(),
-                recognition.get_first_package_delay(),
-                recognition.get_last_package_delay(),
-            ))
+    def handle_audio_stream(self, data: ChatData, handler: 'HandlerASR'):
+        input_stream = data.stream_id
+        input_stream_key = input_stream.key
+        session = self.api_links.get(input_stream_key)
+        if session is None:
+            session = self._create_session(input_stream)
+            self.api_links[input_stream_key] = session
 
-        # Clean up session after processing
-        self.api_links.pop(input_stream_key, None)
+        audio = data.data.get_main_data() if data.data is not None else None
+        if audio is not None:
+            audio = self._normalize_audio(audio)
+            if audio.shape[0] > 0:
+                logger.info('audio in')
+                try:
+                    self._start_recognition_if_needed(session, handler, input_stream_key)
+                    for audio_segment in slice_data(session.audio_slice_context, audio):
+                        self._send_audio_segment(session, audio_segment)
+                except Exception as e:
+                    logger.error(f"BailianASR recognition exception: {e}")
+                    self._emit_error_text(session, input_stream_key, str(e))
+                    session.reset()
+                    self.api_links.pop(input_stream_key, None)
+                    return
+
+        if not data.is_last_data:
+            return
+
+        remainder_audio = session.audio_slice_context.flush()
+        try:
+            if remainder_audio is not None and remainder_audio.shape[0] > 0:
+                self._start_recognition_if_needed(session, handler, input_stream_key)
+                self._send_audio_segment(session, remainder_audio)
+        except Exception as e:
+            logger.error(f"BailianASR recognition exception: {e}")
+            self._emit_error_text(session, input_stream_key, str(e))
+            session.reset()
+            self.api_links.pop(input_stream_key, None)
+            return
+
+        if session.sent_sample_count == 0:
+            session.reset()
+            self.api_links.pop(input_stream_key, None)
+            return
+
+        try:
+            self._send_final_silence_padding(session, handler)
+        except Exception as e:
+            logger.error(f"BailianASR final silence padding exception: {e}")
+            self._emit_error_text(session, input_stream_key, str(e))
+            session.reset()
+            self.api_links.pop(input_stream_key, None)
+            return
+
+        self._finish_recognition_session(input_stream_key, session, handler)
 
 
 class HandlerASR(HandlerBase, ABC):
@@ -269,6 +360,7 @@ class HandlerASR(HandlerBase, ABC):
         self.audio_format = 'pcm'
         self.semantic_punctuation_enabled = False
         self.language_hints = None
+        self.final_silence_padding_ms = 500
 
     def get_handler_info(self) -> HandlerBaseInfo:
         return HandlerBaseInfo(
@@ -304,6 +396,7 @@ class HandlerASR(HandlerBase, ABC):
         self.audio_format = config.format
         self.semantic_punctuation_enabled = config.semantic_punctuation_enabled
         self.language_hints = config.language_hints
+        self.final_silence_padding_ms = config.final_silence_padding_ms
 
         if 'DASHSCOPE_API_KEY' in os.environ:
             # load API-key from environment variable DASHSCOPE_API_KEY
@@ -316,6 +409,7 @@ class HandlerASR(HandlerBase, ABC):
 
         logger.info(f"BailianASR loaded, model={self.model_name}, "
                     f"sample_rate={self.sample_rate}, format={self.audio_format}, "
+                    f"final_silence_padding_ms={self.final_silence_padding_ms}, "
                     f"base_websocket_url={config.base_websocket_url}")
 
     def create_context(self, session_context, handler_config=None):

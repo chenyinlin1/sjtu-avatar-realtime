@@ -55,6 +55,7 @@ default:
         sample_rate: 16000
         format: "pcm"
         semantic_punctuation_enabled: False
+        final_silence_padding_ms: 500  # ASR stop 前补 500ms 静音，帮助百炼更快确认句尾
         language_hints:
           - "zh"
         base_websocket_url: "wss://dashscope.aliyuncs.com/api-ws/v1/inference"
