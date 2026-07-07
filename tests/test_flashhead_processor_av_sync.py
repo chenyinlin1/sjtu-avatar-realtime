@@ -33,13 +33,17 @@ def test_collector_pairs_queued_idle_animation_frame_with_silent_audio():
     )
 
     video_frames = []
+    video_speech_ids = []
     audio_frames = []
+    audio_speech_ids = []
 
-    def on_video_frame(frame):
+    def on_video_frame(frame, speech_id=None):
         video_frames.append(frame.copy())
+        video_speech_ids.append(speech_id)
 
-    def on_audio_frame(audio):
+    def on_audio_frame(audio, speech_id=None):
         audio_frames.append(audio.copy())
+        audio_speech_ids.append(speech_id)
         processor._stop_event.set()
 
     processor.callbacks = FlashHeadProcessorCallbacks(
@@ -51,7 +55,9 @@ def test_collector_pairs_queued_idle_animation_frame_with_silent_audio():
 
     assert len(video_frames) == 1
     np.testing.assert_array_equal(video_frames[0], queued_frame)
+    assert video_speech_ids == [None]
     assert len(audio_frames) == 1
+    assert audio_speech_ids == [None]
     assert audio_frames[0].shape == (960,)
     assert audio_frames[0].dtype == np.float32
     np.testing.assert_array_equal(audio_frames[0], np.zeros(960, dtype=np.float32))

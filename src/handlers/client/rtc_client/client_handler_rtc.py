@@ -390,9 +390,17 @@ class RtcClientSessionDelegate(ClientSessionDelegate):
             logger.warning("signal_emitter is None, cannot emit signal")
 
     def clear_data(self):
-        for data_queue in self.output_queues.values():
+        cleared = {}
+        for modality, data_queue in self.output_queues.items():
+            count = 0
             while not data_queue.empty():
-                data_queue.get_nowait()
+                try:
+                    data_queue.get_nowait()
+                    count += 1
+                except asyncio.QueueEmpty:
+                    break
+            cleared[modality.value] = count
+        return cleared
 
 
 class ClientRtcConfigModel(HandlerBaseConfigModel, BaseModel):
@@ -779,6 +787,86 @@ class ClientHandlerRtc(ClientHandlerBase):
             return None
         return stream
 
+    def _get_client_playback_speech_id(
+        self,
+        context: ClientRtcContext,
+        playback_stream_id,
+    ) -> Optional[str]:
+        stream_manager = getattr(context, "stream_manager", None)
+        if stream_manager is None or playback_stream_id is None:
+            return None
+        current_stream = stream_manager.find_stream(playback_stream_id)
+        if current_stream is None:
+            return None
+
+        candidates = []
+        source_streams = getattr(current_stream, "source_streams", None)
+        if isinstance(source_streams, dict):
+            candidates.extend(source_streams.values())
+        elif source_streams:
+            candidates.extend(source_streams)
+        candidates.extend(getattr(current_stream, "ancestor_streams", []) or [])
+
+        seen = set()
+        for stream_id in candidates:
+            if stream_id is None:
+                continue
+            stream_key = getattr(stream_id, "stream_key_str", None)
+            if stream_key in seen:
+                continue
+            seen.add(stream_key)
+            if getattr(stream_id, "data_type", None) == ChatDataType.AVATAR_AUDIO:
+                return stream_key
+        return None
+
+    def _handle_client_playback_av_sync_signal(self, context: ClientRtcContext, signal: ChatSignal) -> None:
+        related_stream = signal.related_stream
+        if related_stream is None or related_stream.data_type != ChatDataType.CLIENT_PLAYBACK:
+            return
+
+        stream = self._get_chat_channel(context.session_id)
+        reason = related_stream.stream_key_str or "client_playback"
+        if stream is None:
+            logger.debug(
+                f"RTC AV sync signal skipped: stream not available for session={context.session_id} "
+                f"signal={signal.type.value} reason={reason}"
+            )
+            return
+
+        if signal.type == ChatSignalType.STREAM_BEGIN:
+            if related_stream.producer_name != "FlashHead":
+                return
+            target_speech_id = self._get_client_playback_speech_id(context, related_stream)
+            if target_speech_id is None:
+                logger.debug(
+                    f"RTC AV sync targeted reset skipped: no AVATAR_AUDIO source for "
+                    f"session={context.session_id} playback={reason}"
+                )
+                return
+            reset = getattr(stream, "request_av_sync_reset", None)
+            if callable(reset):
+                reset(
+                    reason=f"{reason}:stream_begin",
+                    target_speech_id=target_speech_id,
+                    wait_for_audio=True,
+                )
+            return
+
+        if signal.type == ChatSignalType.STREAM_CANCEL:
+            reset = getattr(stream, "request_av_sync_reset", None)
+            if callable(reset):
+                reset(
+                    reason=f"{reason}:stream_cancel",
+                    target_speech_id=None,
+                    wait_for_audio=False,
+                )
+            return
+
+        if signal.type == ChatSignalType.STREAM_END:
+            finish = getattr(stream, "finish_av_sync_playback", None)
+            if callable(finish):
+                finish(reason=f"{reason}:stream_end")
+
     def _send_message_to_chat_channel(self, session_id: str, message) -> bool:
         stream = self._get_chat_channel(session_id)
         if stream is None or stream.chat_channel is None:
@@ -860,6 +948,9 @@ class ClientHandlerRtc(ClientHandlerBase):
         logger.info(
             f"Received signal: {signal.type} for stream: {signal.related_stream.data_type if signal.related_stream else None}")
         if signal.related_stream is not None and signal.related_stream.data_type == ChatDataType.CLIENT_PLAYBACK:
+            self._handle_client_playback_av_sync_signal(context, signal)
+
+        if signal.related_stream is not None and signal.related_stream.data_type == ChatDataType.CLIENT_PLAYBACK:
 
             signal_payload = ChatSignalPayload(
                 type=signal.type,
@@ -873,8 +964,9 @@ class ClientHandlerRtc(ClientHandlerBase):
 
             if signal.type == ChatSignalType.STREAM_CANCEL:
                 current_stream = context.stream_manager.find_stream(signal.related_stream)
-                signal_payload.parent_stream_keys = [
-                    stream.stream_key_str for stream in current_stream.ancestor_streams]
+                if current_stream is not None:
+                    signal_payload.parent_stream_keys = [
+                        stream.stream_key_str for stream in current_stream.ancestor_streams]
 
             message = ChatSignalMessage(
                 header=MessageHeader(name=MessageType.CHAT_SIGNAL, request_id=str(uuid4())),

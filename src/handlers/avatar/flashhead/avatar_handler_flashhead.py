@@ -77,11 +77,11 @@ class FlashHeadContext(HandlerContext):
     def _build_callbacks(self) -> FlashHeadProcessorCallbacks:
         """Build callbacks that bridge Processor output to engine's submit_data."""
 
-        def on_video_frame(frame: np.ndarray):
-            self._return_data(frame, ChatDataType.AVATAR_VIDEO)
+        def on_video_frame(frame: np.ndarray, speech_id: Optional[str] = None):
+            self._return_data(frame, ChatDataType.AVATAR_VIDEO, speech_id=speech_id)
 
-        def on_audio_frame(audio_data: np.ndarray):
-            self._return_data(audio_data, ChatDataType.AVATAR_AUDIO)
+        def on_audio_frame(audio_data: np.ndarray, speech_id: Optional[str] = None):
+            self._return_data(audio_data, ChatDataType.AVATAR_AUDIO, speech_id=speech_id)
 
         def on_speech_end(speech_id: str):
             streamer = self.get_playback_streamer()
@@ -127,7 +127,8 @@ class FlashHeadContext(HandlerContext):
             on_speech_end=on_speech_end,
         )
 
-    def _return_data(self, data: np.ndarray, chat_data_type: ChatDataType) -> None:
+    def _return_data(self, data: np.ndarray, chat_data_type: ChatDataType,
+                     speech_id: Optional[str] = None) -> None:
         """Package and submit output data for downstream consumption."""
         definition = self.output_data_definitions.get(chat_data_type)
         if definition is None:
@@ -149,6 +150,8 @@ class FlashHeadContext(HandlerContext):
             data_bundle.set_main_data(data[np.newaxis, ...])
         else:
             return
+        if speech_id is not None:
+            data_bundle.metadata["flashhead_speech_id"] = speech_id
         chat_data = ChatData(type=chat_data_type, data=data_bundle)
         self.submit_data(chat_data)
 

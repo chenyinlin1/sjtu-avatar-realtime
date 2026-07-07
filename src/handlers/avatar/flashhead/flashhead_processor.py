@@ -31,8 +31,8 @@ except ValueError:
 @dataclass
 class FlashHeadProcessorCallbacks:
     """Callback functions bridging processor output to the engine."""
-    on_video_frame: Optional[Callable[[np.ndarray], None]] = None
-    on_audio_frame: Optional[Callable[[np.ndarray], None]] = None
+    on_video_frame: Optional[Callable[[np.ndarray, Optional[str]], None]] = None
+    on_audio_frame: Optional[Callable[[np.ndarray, Optional[str]], None]] = None
     on_speech_end: Optional[Callable[[str], None]] = None
 
 
@@ -560,9 +560,9 @@ class FlashHeadProcessor:
                 # Queued video frames may be speech or generated idle animation;
                 # always pair them with audio so WebRTC audio/video PTS advance together.
                 if self.callbacks.on_video_frame:
-                    self.callbacks.on_video_frame(item.video_frame)
+                    self.callbacks.on_video_frame(item.video_frame, item.speech_id)
                 if self.callbacks.on_audio_frame:
-                    self.callbacks.on_audio_frame(audio_segment)
+                    self.callbacks.on_audio_frame(audio_segment, item.speech_id)
                 if item.end_of_speech:
                     if self.callbacks.on_speech_end:
                         self.callbacks.on_speech_end(item.speech_id)
@@ -589,10 +589,10 @@ class FlashHeadProcessor:
                 # this, video runs ahead because idle frames had no
                 # paired audio and emit() would block.
                 if self.callbacks.on_video_frame:
-                    self.callbacks.on_video_frame(self._idle_frame)
+                    self.callbacks.on_video_frame(self._idle_frame, None)
                 if self.callbacks.on_audio_frame:
                     self.callbacks.on_audio_frame(
-                        np.zeros(self._original_audio_per_frame, dtype=np.float32)
+                        np.zeros(self._original_audio_per_frame, dtype=np.float32), None
                     )
                 # Pure end marker (no video but need to close stream)
                 if item is not None and item.end_of_speech:
