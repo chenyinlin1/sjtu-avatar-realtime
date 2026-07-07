@@ -174,7 +174,8 @@ def test_music_control_stop_recognizes_natural_stop_phrases():
     for text in ["停止播放", "停止音乐", "停止放歌", "结束音乐", "关掉播放", "别播了", "不要放了"]:
         assert handler._extract_music_control(text) == {"action": "stop"}
 
-    assert handler._extract_music_control("暂停") == {"action": "pause"}
+    for text in ["暂停", "暂停。", "暂停！", "停。"]:
+        assert handler._extract_music_control(text) == {"action": "pause"}
 
 
 class FakeHistory:

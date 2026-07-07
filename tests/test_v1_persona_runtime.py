@@ -136,6 +136,36 @@ def test_tts_context_uses_persona_voice(monkeypatch):
     assert created["model"] == "cosyvoice-v3-flash"
 
 
+def test_tts_context_falls_back_v35_default_voice_to_v3_flash(monkeypatch):
+    created = {}
+
+    class FakeSynthesizer:
+        def __init__(self, **kwargs):
+            created.update(kwargs)
+
+    monkeypatch.setattr(tts_module, "SpeechSynthesizer", FakeSynthesizer)
+
+    context = TTSContext("session_1")
+    context.shared_states = SimpleNamespace()
+    context.data_submitter = SimpleNamespace(
+        get_streamer=lambda data_type: SimpleNamespace(data_definition=object())
+    )
+    session = BailianTTSSession(input_stream_id=SimpleNamespace(key="input-key"))
+    handler = SimpleNamespace(
+        model_name="cosyvoice-v3.5-flash",
+        voice="longanhuan_v3",
+        instruction="请用四川话表达。",
+    )
+
+    context._ensure_synthesizer(session, handler)
+
+    assert created["voice"] == "longanhuan_v3"
+    assert created["model"] == "cosyvoice-v3-flash"
+    assert created["instruction"] == "请用四川话表达。"
+    assert session.model_name == "cosyvoice-v3-flash"
+    assert session.voice == "longanhuan_v3"
+
+
 def test_flashhead_runtime_face_refreshes_processor(tmp_path):
     face_path = tmp_path / "face.png"
     face_path.write_bytes(b"fake image")

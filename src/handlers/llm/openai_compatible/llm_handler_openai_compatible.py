@@ -2009,7 +2009,7 @@ class HandlerLLM(HandlerBase, ABC):
         normalized = (text or "").strip()
         if not normalized:
             return None
-        compact = re.sub(r"\s+", "", normalized)
+        compact = re.sub(r"[\s，。！？!?,;；：:\"'“”‘’（）()【】\[\]《》、.]+", "", normalized)
         if any(
             keyword in compact for keyword in (
                 "停止音乐",

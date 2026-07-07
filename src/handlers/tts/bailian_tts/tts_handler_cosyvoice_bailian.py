@@ -27,6 +27,10 @@ from chat_engine.data_models.chat_stream import StreamKey, ChatStreamIdentity
 from chat_engine.data_models.chat_stream_config import ChatStreamConfig
 
 
+COSYVOICE_V35_FLASH_MODEL = "cosyvoice-v3.5-flash"
+COSYVOICE_V3_FLASH_MODEL = "cosyvoice-v3-flash"
+
+
 class TTSConfig(HandlerBaseConfigModel, BaseModel):
     ref_audio_path: str = Field(default=None)
     ref_audio_text: str = Field(default=None)
@@ -134,6 +138,12 @@ class TTSContext(HandlerContext):
             logger.info(
                 f"TTS: using persona voice persona_id={persona_runtime.get('persona_id')} "
                 f"voice={voice} model={model_name}"
+            )
+        elif model_name == COSYVOICE_V35_FLASH_MODEL:
+            model_name = COSYVOICE_V3_FLASH_MODEL
+            logger.info(
+                f"TTS: no persona voice for {COSYVOICE_V35_FLASH_MODEL}; "
+                f"falling back default voice={voice} to model={model_name}"
             )
         session.model_name = model_name
         session.voice = voice
