@@ -434,6 +434,10 @@ class HandlerAvatarFlashHead(HandlerBase):
             signal_filters=[
                 # 监听 CLIENT_PLAYBACK 的 STREAM_CANCEL 信号（用于打断）
                 SignalFilterRule(ChatSignalType.STREAM_CANCEL, None, ChatDataType.CLIENT_PLAYBACK),
+                # 兜底监听全局打断以及 FlashHead/TTS 音频流取消，避免只取消外层音频流时
+                # processor 仍继续输出旧帧。
+                SignalFilterRule(ChatSignalType.INTERRUPT, None, None),
+                SignalFilterRule(ChatSignalType.STREAM_CANCEL, None, ChatDataType.AVATAR_AUDIO),
             ]
         )
 
@@ -570,12 +574,38 @@ class HandlerAvatarFlashHead(HandlerBase):
     def on_signal(self, context: HandlerContext, signal: ChatSignal):
         if not isinstance(context, FlashHeadContext):
             return
-        if (signal.type == ChatSignalType.STREAM_CANCEL
-                and signal.related_stream.data_type == ChatDataType.CLIENT_PLAYBACK):
+        if signal.type == ChatSignalType.INTERRUPT:
+            logger.info("FlashHead: Received INTERRUPT signal, interrupting avatar")
+            logger.info(
+                f"INTERRUPT_TRACE flashhead_interrupt_received "
+                f"session={context.session_id} source_name={signal.source_name} "
+                f"mono={time.monotonic():.6f}"
+            )
+            context.interrupt()
+            return
+
+        if signal.type != ChatSignalType.STREAM_CANCEL or signal.related_stream is None:
+            return
+
+        related_stream = signal.related_stream
+        should_interrupt = related_stream.data_type == ChatDataType.CLIENT_PLAYBACK
+        if related_stream.data_type == ChatDataType.AVATAR_AUDIO:
+            with context._stream_key_lock:
+                current_tts_stream_key = context._current_tts_stream_key
+            is_flashhead_output = related_stream.producer_name == "FlashHead"
+            is_current_tts_stream = (
+                current_tts_stream_key is not None
+                and related_stream.stream_key_str == current_tts_stream_key
+            )
+            should_interrupt = is_flashhead_output or is_current_tts_stream
+
+        if should_interrupt:
             logger.info("FlashHead: Received STREAM_CANCEL signal, interrupting avatar")
             logger.info(
                 f"INTERRUPT_TRACE flashhead_cancel_received "
-                f"session={context.session_id} stream={signal.related_stream.stream_key_str} "
+                f"session={context.session_id} stream={related_stream.stream_key_str} "
+                f"stream_type={related_stream.data_type.value} "
+                f"producer={related_stream.producer_name} "
                 f"mono={time.monotonic():.6f}"
             )
             context.interrupt()

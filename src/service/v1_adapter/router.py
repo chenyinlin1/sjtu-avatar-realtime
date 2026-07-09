@@ -13,6 +13,7 @@ from .responses import (
     v1_request_validation_exception_handler,
     v1_success,
 )
+from .tts.routes import register_tts_routes
 
 
 def register_v1_adapter(app: FastAPI) -> None:
@@ -40,3 +41,4 @@ def register_v1_adapter(app: FastAPI) -> None:
         )
 
     register_persona_routes(app)
+    register_tts_routes(app)

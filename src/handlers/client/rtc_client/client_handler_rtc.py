@@ -819,6 +819,24 @@ class ClientHandlerRtc(ClientHandlerBase):
                 return stream_key
         return None
 
+    def _handle_interrupt_av_sync_signal(self, context: ClientRtcContext, signal: ChatSignal) -> None:
+        stream = self._get_chat_channel(context.session_id)
+        source_name = signal.source_name or "unknown"
+        if stream is None:
+            logger.debug(
+                f"RTC AV sync interrupt reset skipped: stream not available "
+                f"for session={context.session_id} source={source_name}"
+            )
+            return
+
+        reset = getattr(stream, "request_av_sync_reset", None)
+        if callable(reset):
+            reset(
+                reason=f"interrupt:{source_name}",
+                target_speech_id=None,
+                wait_for_audio=False,
+            )
+
     def _handle_client_playback_av_sync_signal(self, context: ClientRtcContext, signal: ChatSignal) -> None:
         related_stream = signal.related_stream
         if related_stream is None or related_stream.data_type != ChatDataType.CLIENT_PLAYBACK:
@@ -947,6 +965,9 @@ class ClientHandlerRtc(ClientHandlerBase):
         context = cast(ClientRtcContext, context)
         logger.info(
             f"Received signal: {signal.type} for stream: {signal.related_stream.data_type if signal.related_stream else None}")
+        if signal.type == ChatSignalType.INTERRUPT:
+            self._handle_interrupt_av_sync_signal(context, signal)
+
         if signal.related_stream is not None and signal.related_stream.data_type == ChatDataType.CLIENT_PLAYBACK:
             self._handle_client_playback_av_sync_signal(context, signal)
 

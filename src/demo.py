@@ -88,6 +88,7 @@ def main():
     config_loggers(logger_config)
     
     demo_app, ui, parent_block = setup_demo()
+    demo_app.state.open_avatar_chat_engine_config = engine_config
     register_v1_adapter(demo_app)
     
     chat_engine = ChatEngine()
