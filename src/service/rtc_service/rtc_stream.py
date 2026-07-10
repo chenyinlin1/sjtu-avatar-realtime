@@ -112,6 +112,7 @@ class RtcStream(AsyncAudioVideoStreamHandler):
         self._av_sync_reset_wait_for_audio = True
         self._av_sync_current_speech_id: Optional[str] = None
         self._av_sync_wait_for_first_audio = False
+        self._input_gate_drop_logged = False
 
     def _av_sync_audio_ms(self) -> float:
         if self.output_sample_rate <= 0:
@@ -464,6 +465,8 @@ class RtcStream(AsyncAudioVideoStreamHandler):
         timestamp = self.client_session_delegate.get_timestamp()
         if timestamp[0] / timestamp[1] < self.stream_start_delay:
             return
+        if self._drop_input_until_persona_active("audio"):
+            return
         _, array = frame
         self.client_session_delegate.put_data(
             EngineChannelType.AUDIO,
@@ -484,6 +487,25 @@ class RtcStream(AsyncAudioVideoStreamHandler):
             timestamp,
             self.fps,
         )
+
+    def _persona_active(self) -> bool:
+        if self.client_session_delegate is None:
+            return False
+        shared_states = getattr(self.client_session_delegate, "shared_states", None)
+        if shared_states is None:
+            return False
+        return bool(getattr(shared_states, "persona_runtime", None))
+
+    def _drop_input_until_persona_active(self, data_type: str) -> bool:
+        if self._persona_active():
+            return False
+        if not self._input_gate_drop_logged:
+            logger.info(
+                f"[{self.session_id}] Input gated until DeviceInfoAck persona_active=true; "
+                f"drop={data_type}"
+            )
+            self._input_gate_drop_logged = True
+        return True
 
     def _send_data_channel_json(self, name: str, request_id: str, payload: Dict[str, Any]):
         if self.chat_channel is None:
@@ -570,6 +592,8 @@ class RtcStream(AsyncAudioVideoStreamHandler):
         if self.client_session_delegate.shared_states is not None:
             self.client_session_delegate.shared_states.persona_runtime = persona_runtime
             self.client_session_delegate.shared_states.device_info = device_info
+        if persona_runtime:
+            self._input_gate_drop_logged = False
         audit_event(
             self.client_session_delegate,
             "device_info_registered",
@@ -685,6 +709,16 @@ class RtcStream(AsyncAudioVideoStreamHandler):
                     #         source_name="rtc",
                     #     )
                     # )
+                    if self._drop_input_until_persona_active("text"):
+                        self._send_data_channel_json(
+                            "Error",
+                            request_id,
+                            {
+                                "code": "PERSONA_NOT_ACTIVE",
+                                "message": "persona is not active",
+                            },
+                        )
+                        return
                     self.client_session_delegate.emit_signal(
                         ChatSignal(
                             # begin a new round of responding
