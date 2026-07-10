@@ -548,17 +548,19 @@ class RtcStream(AsyncAudioVideoStreamHandler):
             except PersonaRuntimeError as exc:
                 if self.client_session_delegate.shared_states is not None:
                     self.client_session_delegate.shared_states.persona_runtime = None
+                public_code = "PERSONA_NOT_FOUND" if exc.code == "PERSONA_NOT_OWNED" else exc.code
+                public_message = "persona not found" if public_code == "PERSONA_NOT_FOUND" else exc.message
                 self._send_data_channel_json(
                     "Error",
                     request_id,
                     {
-                        "code": exc.code,
-                        "message": exc.message,
+                        "code": public_code,
+                        "message": public_message,
                     },
                 )
                 logger.warning(
                     f"[{self.session_id}] DeviceInfo persona rejected: "
-                    f"code={exc.code}, message={exc.message}, "
+                    f"code={public_code}, internal_code={exc.code}, message={exc.message}, "
                     f"device_sn={device_info['device_sn']}, elder_id={device_info['elder_id']}, "
                     f"tenant_id={device_info['tenant_id']}, persona_id={device_info['persona_id']}"
                 )
