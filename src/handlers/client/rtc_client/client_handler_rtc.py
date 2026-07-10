@@ -444,7 +444,7 @@ class ClientHandlerRtc(ClientHandlerBase):
             output_sample_rate=24000,
             output_frame_size=480,
             fps=output_video_fps,
-            stream_start_delay=0.5,
+            stream_start_delay=0,  #这个参数会导致前stream_start_delay这个时间段内的音频被丢弃，导致前面几秒的音频没有被处理，影响体验，王春昂于2026/7/10/16:18修改为0
         )
         self.rtc_streamer_factory.client_handler_delegate = self.handler_delegate
 

@@ -626,9 +626,12 @@ class ChatStreamer:
                 and now - stats.end_mark >= self._ended_input_retention):
                 to_remove.append(key)
                 continue
-            # Remove cancelled streams
+            # Remove streams that were cancelled or have already been recycled.
+            # Keeping a missing parent here can make the next output stream
+            # auto-cancel during creation, leaving the producer without a
+            # current stream after an interrupt.
             stream = self._storage.find_stream(stats.stream_id)
-            if stream is not None and stream.status == ChatStreamStatus.CANCELLED:
+            if stream is None or stream.status == ChatStreamStatus.CANCELLED:
                 to_remove.append(key)
         for key in to_remove:
             self._input_stream_ids.pop(key, None)

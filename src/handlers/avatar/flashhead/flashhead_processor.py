@@ -559,13 +559,29 @@ class FlashHeadProcessor:
                     )
                 # Queued video frames may be speech or generated idle animation;
                 # always pair them with audio so WebRTC audio/video PTS advance together.
-                if self.callbacks.on_video_frame:
-                    self.callbacks.on_video_frame(item.video_frame, item.speech_id)
-                if self.callbacks.on_audio_frame:
-                    self.callbacks.on_audio_frame(audio_segment, item.speech_id)
-                if item.end_of_speech:
-                    if self.callbacks.on_speech_end:
-                        self.callbacks.on_speech_end(item.speech_id)
+                if (
+                    self.callbacks.on_video_frame
+                    and not self._invoke_collector_callback(
+                        "video", self.callbacks.on_video_frame, item,
+                        item.video_frame, item.speech_id,
+                    )
+                ):
+                    frame_id += 1
+                    continue
+                if (
+                    self.callbacks.on_audio_frame
+                    and not self._invoke_collector_callback(
+                        "audio", self.callbacks.on_audio_frame, item,
+                        audio_segment, item.speech_id,
+                    )
+                ):
+                    frame_id += 1
+                    continue
+                if item.end_of_speech and self.callbacks.on_speech_end:
+                    self._invoke_collector_callback(
+                        "speech_end", self.callbacks.on_speech_end, item,
+                        item.speech_id,
+                    )
             else:
                 self._av_diag_collect_seq += 1
                 idle_audio_samples = self._original_audio_per_frame
@@ -588,20 +604,60 @@ class FlashHeadProcessor:
                 # audio/video PTS advance at the same rate.  Without
                 # this, video runs ahead because idle frames had no
                 # paired audio and emit() would block.
-                if self.callbacks.on_video_frame:
-                    self.callbacks.on_video_frame(self._idle_frame, None)
-                if self.callbacks.on_audio_frame:
-                    self.callbacks.on_audio_frame(
-                        np.zeros(self._original_audio_per_frame, dtype=np.float32), None
+                if (
+                    self.callbacks.on_video_frame
+                    and not self._invoke_collector_callback(
+                        "video", self.callbacks.on_video_frame, item,
+                        self._idle_frame, None,
                     )
+                ):
+                    frame_id += 1
+                    continue
+                if (
+                    self.callbacks.on_audio_frame
+                    and not self._invoke_collector_callback(
+                        "audio", self.callbacks.on_audio_frame, item,
+                        np.zeros(self._original_audio_per_frame, dtype=np.float32), None,
+                    )
+                ):
+                    frame_id += 1
+                    continue
                 # Pure end marker (no video but need to close stream)
-                if item is not None and item.end_of_speech:
-                    if self.callbacks.on_speech_end:
-                        self.callbacks.on_speech_end(item.speech_id)
+                if item is not None and item.end_of_speech and self.callbacks.on_speech_end:
+                    self._invoke_collector_callback(
+                        "speech_end", self.callbacks.on_speech_end, item,
+                        item.speech_id,
+                    )
 
             frame_id += 1
 
         logger.info("FlashHead frame collector stopped")
+
+    def _invoke_collector_callback(
+        self,
+        callback_name: str,
+        callback: Callable,
+        item: Optional[FrameQueueItem],
+        *args,
+    ) -> bool:
+        """Invoke one output callback without allowing it to kill the collector."""
+        try:
+            callback(*args)
+            return True
+        except Exception as exc:
+            kind = (
+                "speech" if item is not None and item.speech_id is not None
+                else "end_marker" if item is not None and item.end_of_speech
+                else "idle"
+            )
+            logger.opt(exception=exc).error(
+                f"FlashHead frame collector callback failed; skipping frame: "
+                f"callback={callback_name} kind={kind} "
+                f"speech_id={getattr(item, 'speech_id', None)} "
+                f"end={getattr(item, 'end_of_speech', False)} "
+                f"queue_size={self._output_queue.qsize()}"
+            )
+            return False
 
     def _get_audio_embedding(self, audio_array: np.ndarray):
         """Extract wav2vec2 audio embedding with windowed sampling."""
