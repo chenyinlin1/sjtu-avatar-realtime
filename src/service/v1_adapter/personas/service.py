@@ -108,6 +108,15 @@ class PersonaService:
         try:
             stored = self.media_storage.save_voice_bytes(persona_id, filename, content)
         except MediaStorageError as exc:
+            self._mark_voice_failed(
+                persona_id,
+                fail_reason=exc.message,
+                ref_text=ref_text,
+                sample_duration_ms=source_duration_ms,
+                voice_id=voice_id,
+                model_name=model_name,
+                clone_source_url=clone_source_url,
+            )
             raise V1HTTPException(exc.code, exc.message, exc.status_code) from exc
         timestamp = now_ms()
         voice_status = AssetStatus.READY if voice_id else AssetStatus.PROCESSING
@@ -134,16 +143,35 @@ class PersonaService:
         ref_text: str,
         source_duration_ms: Optional[int],
     ) -> Dict:
+        self._require_persona(persona_id)
         try:
             content, filename = self.media_storage.download(audio_url, MAX_VOICE_BYTES)
         except MediaStorageError as exc:
+            self._mark_voice_failed(
+                persona_id,
+                fail_reason=exc.message,
+                ref_text=ref_text,
+                sample_duration_ms=source_duration_ms,
+                clone_source_url=audio_url,
+            )
             raise V1HTTPException(exc.code, exc.message, exc.status_code) from exc
         target_model = self._voice_clone_target_model()
-        voice_id = self._create_voice_clone(
-            persona_id=persona_id,
-            audio_url=audio_url,
-            target_model=target_model,
-        )
+        try:
+            voice_id = self._create_voice_clone(
+                persona_id=persona_id,
+                audio_url=audio_url,
+                target_model=target_model,
+            )
+        except V1HTTPException as exc:
+            self._mark_voice_failed(
+                persona_id,
+                fail_reason=exc.message,
+                ref_text=ref_text,
+                sample_duration_ms=source_duration_ms,
+                model_name=target_model,
+                clone_source_url=audio_url,
+            )
+            raise
         return self.upload_voice_bytes(
             persona_id,
             filename,
@@ -161,6 +189,7 @@ class PersonaService:
         try:
             stored = self.media_storage.save_face_bytes(persona_id, filename, content)
         except MediaStorageError as exc:
+            self._mark_face_failed(persona_id, fail_reason=exc.message)
             raise V1HTTPException(exc.code, exc.message, exc.status_code) from exc
         timestamp = now_ms()
         record.face = FaceAsset(
@@ -174,9 +203,11 @@ class PersonaService:
         return {"persona_id": persona_id, "face_status": record.face.status.value}
 
     def upload_face_url(self, persona_id: str, image_url: str) -> Dict:
+        self._require_persona(persona_id)
         try:
             content, filename = self.media_storage.download(image_url, MAX_FACE_BYTES)
         except MediaStorageError as exc:
+            self._mark_face_failed(persona_id, fail_reason=exc.message)
             raise V1HTTPException(exc.code, exc.message, exc.status_code) from exc
         return self.upload_face_bytes(persona_id, filename, content)
 
@@ -253,6 +284,47 @@ class PersonaService:
             self.media_storage.delete_persona_media(persona_id)
         except MediaStorageError as exc:
             raise V1HTTPException(exc.code, exc.message, exc.status_code) from exc
+
+    def _mark_voice_failed(
+        self,
+        persona_id: str,
+        *,
+        fail_reason: str,
+        ref_text: Optional[str] = None,
+        sample_duration_ms: Optional[int] = None,
+        voice_id: Optional[str] = None,
+        model_name: Optional[str] = None,
+        clone_source_url: Optional[str] = None,
+    ) -> None:
+        records = self._load_records()
+        record = self._require_persona_from_records(records, persona_id)
+        timestamp = now_ms()
+        record.voice = VoiceAsset(
+            status=AssetStatus.FAILED,
+            ref_text=ref_text,
+            sample_duration_ms=sample_duration_ms,
+            voice_id=voice_id,
+            model_name=model_name,
+            clone_source_url=clone_source_url,
+            fail_reason=fail_reason,
+            updated_at=timestamp,
+        )
+        record.updated_at = timestamp
+        records[persona_id] = recompute_persona_status(record)
+        self._write_records(records)
+
+    def _mark_face_failed(self, persona_id: str, *, fail_reason: str) -> None:
+        records = self._load_records()
+        record = self._require_persona_from_records(records, persona_id)
+        timestamp = now_ms()
+        record.face = FaceAsset(
+            status=AssetStatus.FAILED,
+            fail_reason=fail_reason,
+            updated_at=timestamp,
+        )
+        record.updated_at = timestamp
+        records[persona_id] = recompute_persona_status(record)
+        self._write_records(records)
 
     @staticmethod
     def _voice_clone_target_model() -> str:
