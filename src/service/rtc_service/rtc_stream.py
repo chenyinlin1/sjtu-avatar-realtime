@@ -629,12 +629,23 @@ class RtcStream(AsyncAudioVideoStreamHandler):
             cleaned = str(value).strip()
             return cleaned or None
 
+        raw_elder_profile = payload.get("elder_profile")
+        elder_profile = None
+        if isinstance(raw_elder_profile, dict):
+            elder_profile = {
+                "nickname": optional_text(raw_elder_profile.get("nickname")),
+                "gender": optional_text(raw_elder_profile.get("gender")),
+                "age": raw_elder_profile.get("age"),
+                "native_place": optional_text(raw_elder_profile.get("native_place")),
+            }
+
         device_info = {
             "device_sn": device_sn,
             "elder_id": optional_text(payload.get("elder_id")),
             "tenant_id": optional_text(payload.get("tenant_id")),
             "persona_id": optional_text(payload.get("persona_id")),
             "timezone": optional_text(payload.get("timezone")),
+            "elder_profile": elder_profile,
             "received_at": time.time(),
         }
 

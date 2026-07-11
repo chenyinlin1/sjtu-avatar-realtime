@@ -321,3 +321,32 @@ def test_policy_configuration_is_preserved_when_fastrtc_copies_stream():
     stream.client_handler_delegate = object()
     copied = stream.copy()
     assert copied.session_policy_config["silence_level1_ms"] == 12345
+
+
+def test_device_info_parses_elder_profile(monkeypatch):
+    monkeypatch.setenv("V1_PERSONA_RUNTIME_ENABLED", "0")
+    stream, sent = make_stream()
+
+    stream._handle_device_info(
+        {
+            "device_sn": "speaker-1",
+            "elder_profile": {
+                "nickname": " 王奶奶 ",
+                "gender": " 女 ",
+                "age": 78,
+                "native_place": " 四川成都 ",
+                "ignored": "value",
+            },
+        },
+        "device-info-1",
+    )
+
+    expected = {
+        "nickname": "王奶奶",
+        "gender": "女",
+        "age": 78,
+        "native_place": "四川成都",
+    }
+    assert stream.client_session_delegate.device_info["elder_profile"] == expected
+    assert stream.client_session_delegate.shared_states.device_info["elder_profile"] == expected
+    assert sent[-1]["name"] == "DeviceInfoAck"
