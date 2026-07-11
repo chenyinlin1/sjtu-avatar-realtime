@@ -24,6 +24,7 @@ from chat_engine.data_models.chat_signal import ChatSignal
 from chat_engine.data_models.chat_signal_type import ChatSignalType, ChatSignalSourceType
 from engine_utils.interval_counter import IntervalCounter
 from handlers.client.ws_client.ws_message_protocol import (
+    ClientEventPayload,
     EchoHumanText,
     EchoTextPayload,
     MessageHeader,
@@ -32,6 +33,7 @@ from handlers.client.ws_client.ws_message_protocol import (
 )
 from service.v1_adapter.personas.runtime import PersonaRuntimeError, PersonaRuntimeResolver
 from engine_utils.conversation_audit_logger import audit_event
+from service.rtc_service.session_event_policy import SessionEventPolicy
 
 
 _AV_SYNC_DIAG = os.getenv("AV_SYNC_DIAG", "").lower() in {"1", "true", "yes", "on"}
@@ -70,6 +72,7 @@ class RtcStream(AsyncAudioVideoStreamHandler):
                  output_frame_size=480,
                  fps=30,
                  stream_start_delay = 0.5,
+                 session_policy_config: Optional[Dict[str, Any]] = None,
                  ):
         super().__init__(
             expected_layout=expected_layout,
@@ -113,6 +116,79 @@ class RtcStream(AsyncAudioVideoStreamHandler):
         self._av_sync_current_speech_id: Optional[str] = None
         self._av_sync_wait_for_first_audio = False
         self._input_gate_drop_logged = False
+
+        self.session_event_policy = SessionEventPolicy(
+            session_policy_config,
+            session_id=lambda: self.session_id,
+            send_action=self._send_client_action,
+            emit_interrupt=self._emit_policy_interrupt,
+            runtime_snapshot=self._session_policy_runtime_snapshot,
+        )
+        self.session_policy_config = dict(self.session_event_policy.config)
+
+    @property
+    def _session_ending(self) -> bool:
+        return self.session_event_policy.session_ending
+
+    def note_user_activity(self, source: str = "unknown") -> None:
+        self.session_event_policy.note_user_activity(source)
+
+    def _session_policy_runtime_snapshot(self) -> Dict[str, Any]:
+        delegate = self.client_session_delegate
+        shared_states = getattr(delegate, "shared_states", None)
+        return {
+            "music_active": bool(getattr(shared_states, "music_player_active", False)),
+            "avatar_output_active": (
+                self._av_sync_current_speech_id is not None
+                or self._av_sync_wait_for_first_audio
+            ),
+            "device_info": getattr(delegate, "device_info", None),
+            "closed": self.quit.is_set(),
+        }
+
+    def _send_data_channel_json_threadsafe(
+        self, name: str, request_id: str, payload: Dict[str, Any]
+    ) -> None:
+        loop = self.chat_channel_loop
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(self._send_data_channel_json, name, request_id, payload)
+            return
+        self._send_data_channel_json(name, request_id, payload)
+
+    def _send_client_action(
+        self, action: Dict[str, Any], request_id: Optional[str] = None
+    ) -> None:
+        action = dict(action)
+        action.setdefault("action_id", request_id or f"act-{uuid.uuid4().hex}")
+        payload = {
+            "stream_key": None,
+            "mode": "full_text",
+            "text": "",
+            "end_of_speech": True,
+            "metadata": {"client_action": action},
+        }
+        self._send_data_channel_json_threadsafe(
+            "EchoAvatarText", request_id or str(uuid.uuid4()), payload
+        )
+        logger.info(
+            f"[{self.session_id}] client_action sent: type={action.get('type')} "
+            f"action_id={action.get('action_id')}"
+        )
+
+    def _emit_policy_interrupt(self, reason: str) -> None:
+        if self.client_session_delegate is None:
+            return
+        self.client_session_delegate.emit_signal(
+            ChatSignal(
+                type=ChatSignalType.INTERRUPT,
+                source_type=ChatSignalSourceType.HANDLER,
+                source_name="rtc_session_policy",
+                signal_data={"reason": reason},
+            )
+        )
+
+    def _handle_client_event(self, payload: Dict[str, Any], request_id: str) -> None:
+        self.session_event_policy.handle_client_event(payload, request_id)
 
     def _av_sync_audio_ms(self) -> float:
         if self.output_sample_rate <= 0:
@@ -233,6 +309,7 @@ class RtcStream(AsyncAudioVideoStreamHandler):
                 output_frame_size=self.output_frame_size,
                 fps=self.fps,
                 stream_start_delay=self.stream_start_delay,
+                session_policy_config=self.session_policy_config,
             )
             new_stream.weak_factory = weakref.ref(self)
             return new_stream
@@ -462,6 +539,8 @@ class RtcStream(AsyncAudioVideoStreamHandler):
     async def receive(self, frame: tuple[int, np.ndarray]):
         if self.client_session_delegate is None:
             return
+        if self._session_ending:
+            return
         timestamp = self.client_session_delegate.get_timestamp()
         if timestamp[0] / timestamp[1] < self.stream_start_delay:
             return
@@ -477,6 +556,8 @@ class RtcStream(AsyncAudioVideoStreamHandler):
 
     async def video_receive(self, frame):
         if self.client_session_delegate is None:
+            return
+        if self._session_ending:
             return
         timestamp = self.client_session_delegate.get_timestamp()
         if timestamp[0] / timestamp[1] < self.stream_start_delay:
@@ -553,6 +634,7 @@ class RtcStream(AsyncAudioVideoStreamHandler):
             "elder_id": optional_text(payload.get("elder_id")),
             "tenant_id": optional_text(payload.get("tenant_id")),
             "persona_id": optional_text(payload.get("persona_id")),
+            "timezone": optional_text(payload.get("timezone")),
             "received_at": time.time(),
         }
 
@@ -688,6 +770,24 @@ class RtcStream(AsyncAudioVideoStreamHandler):
                     logger.info(f'on_chat_datachannel: {message}')
                     self._handle_music_status(payload, request_id)
                     return
+                if message_name == "ClientEvent":
+                    logger.info(f"on_chat_datachannel: ClientEvent type={payload.get('type')}")
+                    if getattr(self.client_session_delegate, "device_info", None) is None:
+                        self._send_data_channel_json(
+                            "Error", request_id,
+                            {"code": "DEVICE_INFO_REQUIRED", "message": "DeviceInfo is required before ClientEvent"},
+                        )
+                        return
+                    try:
+                        client_event = ClientEventPayload.model_validate(payload).model_dump()
+                    except ValueError:
+                        self._send_data_channel_json(
+                            "Error", request_id,
+                            {"code": "INVALID_CLIENT_EVENT", "message": "invalid ClientEvent payload"},
+                        )
+                        return
+                    self._handle_client_event(client_event, request_id)
+                    return
                 timestamp = self.client_session_delegate.get_timestamp()
                 if timestamp[0] / timestamp[1] < self.stream_start_delay:
                     return
@@ -702,6 +802,8 @@ class RtcStream(AsyncAudioVideoStreamHandler):
                         )
                     )
                 elif message_name == 'SendHumanText':
+                    if self._session_ending:
+                        return
                     # self.client_session_delegate.emit_signal(
                     #     ChatSignal(
                     #         type=ChatSignalType.INTERRUPT,

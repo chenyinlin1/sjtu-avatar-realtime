@@ -23,6 +23,7 @@ class MessageType(str, Enum):
     TRIGGER_HEARTBEAT = "TriggerHeartbeat"
     INTERRUPT = "Interrupt"
     MUSIC_STATUS = "MusicStatus"
+    CLIENT_EVENT = "ClientEvent"
     
     # 输入端口 - 服务器消息
     AVATAR_SESSION_INITIALIZED = "AvatarSessionInitialized"
@@ -172,6 +173,19 @@ class MusicStatus(BaseModel):
     """音箱端音乐播放状态"""
     header: MessageHeader
     payload: MusicStatusPayload
+
+
+class ClientEventPayload(BaseModel):
+    """音箱端上报的事实事件；具体 data 由事件 type 决定。"""
+    type: str = Field(..., min_length=1, max_length=64, description="事件类型")
+    ts: int = Field(..., ge=0, description="端侧事件发生时刻，epoch 毫秒")
+    data: Dict[str, Any] = Field(default_factory=dict, description="事件附加数据")
+
+
+class ClientEvent(BaseModel):
+    """端侧事件统一信封。"""
+    header: MessageHeader
+    payload: ClientEventPayload
 
 
 # ============================================================================
@@ -387,6 +401,7 @@ def parse_message(json_data: dict) -> Optional[BaseMessage]:
             MessageType.TRIGGER_HEARTBEAT: TriggerHeartbeat,
             MessageType.INTERRUPT: Interrupt,
             MessageType.MUSIC_STATUS: MusicStatus,
+            MessageType.CLIENT_EVENT: ClientEvent,
             MessageType.AVATAR_SESSION_INITIALIZED: AvatarSessionInitialized,
             MessageType.ECHO_HUMAN_TEXT: EchoHumanText,
             MessageType.ECHO_AVATAR_TEXT: EchoAvatarText,
@@ -406,7 +421,7 @@ def parse_message(json_data: dict) -> Optional[BaseMessage]:
         
         return message_class.model_validate(json_data)
     except Exception as e:
-        logger.error(f"解析JSON消息时发生异常: {e}", exc_info=True)
+        logger.opt(exception=e).error("解析JSON消息时发生异常")
         return None
 
 

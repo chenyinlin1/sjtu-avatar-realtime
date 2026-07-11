@@ -21,6 +21,25 @@ default:
         module: client/rtc_client/client_handler_rtc
         # max time a session will last for
         connection_ttl: 900
+        # 双向事件通道：仅处理端侧明确上报的会话事件，不增加普通对话链路耗时
+        session_policy:
+          enabled: true
+          silence_level1_ms: 60000
+          silence_level2_ms: 90000
+          event_max_age_ms: 120000
+          event_future_tolerance_ms: 30000
+          silence_level1_text: "您还在听吗？想聊啥子都可以。"
+          silence_level2_text: "那您先歇一会儿，有需要再喊我。"
+          farewell_text: "好嘞，您早点休息，有需要再喊我。"
+          exit_intent_enabled: true
+          exit_intent_api_url: "https://api.deepseek.com"
+          exit_intent_model_name: "deepseek-v4-flash"
+          exit_intent_timeout_seconds: 2.5
+          exit_intent_confidence: 0.82
+          reminder_capture_enabled: true
+          reminder_extract_confidence: 0.75
+          reminder_success_text: "好的，提醒已经记好了。"
+          reminder_failure_text: "这个提醒没记上，您再说一遍时间吧。"
         output_video_fps: 25  # Must match FlashHead fps (25) for correct A/V sync
         input_video_enabled: True
         turn_config:

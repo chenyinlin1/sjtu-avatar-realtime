@@ -47,6 +47,7 @@ export default defineConfig({
               items: [
                 { text: '配置说明', link: '/reference/configuration' },
                 { text: '预置模式', link: '/reference/preset-modes' },
+                { text: '音箱会话事件通道', link: '/reference/speaker-session-event-integration' },
               ],
             },
             {

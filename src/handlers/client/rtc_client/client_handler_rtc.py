@@ -307,6 +307,7 @@ from service.frontend_service.voice_clone_upload import (
 )
 from service.rtc_service.rtc_provider import RTCProvider
 from service.rtc_service.rtc_stream import RtcStream
+from service.rtc_service.session_event_policy import SessionEventPolicyConfig
 from chat_engine.data_models.chat_signal_type import ChatSignalType
 
 
@@ -405,6 +406,7 @@ class RtcClientSessionDelegate(ClientSessionDelegate):
 
 class ClientRtcConfigModel(HandlerBaseConfigModel, BaseModel):
     connection_ttl: int = Field(default=900)
+    session_policy: SessionEventPolicyConfig = Field(default_factory=SessionEventPolicyConfig)
     turn_config: Optional[Dict] = Field(default=None)
     output_video_fps: int = Field(
         default=30, description="Output video frame rate for RTC stream. Must match the avatar handler's fps (e.g. 20 for MuseTalk, 30 for LiteAvatar) to ensure correct lip-sync PTS.")
@@ -445,6 +447,7 @@ class ClientHandlerRtc(ClientHandlerBase):
             output_frame_size=480,
             fps=output_video_fps,
             stream_start_delay=0,  #这个参数会导致前stream_start_delay这个时间段内的音频被丢弃，导致前面几秒的音频没有被处理，影响体验，王春昂于2026/7/10/16:18修改为0
+            session_policy_config=self.handler_config.session_policy.model_dump(),
         )
         self.rtc_streamer_factory.client_handler_delegate = self.handler_delegate
 
@@ -909,6 +912,9 @@ class ClientHandlerRtc(ClientHandlerBase):
         if inputs.data is not None and getattr(inputs.data, "metadata", None):
             stream_metadata = dict(inputs.data.metadata)
         if inputs.type == ChatDataType.HUMAN_TEXT:
+            stream = self._get_chat_channel(context.session_id)
+            if stream is not None:
+                stream.note_user_activity("human_text")
             response = EchoHumanText(
                 header=MessageHeader(name=MessageType.ECHO_HUMAN_TEXT, request_id=str(uuid4())),
                 payload=EchoTextPayload(
