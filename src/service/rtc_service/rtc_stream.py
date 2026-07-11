@@ -116,6 +116,7 @@ class RtcStream(AsyncAudioVideoStreamHandler):
         self._av_sync_current_speech_id: Optional[str] = None
         self._av_sync_wait_for_first_audio = False
         self._input_gate_drop_logged = False
+        self._pending_device_info: Optional[tuple[Dict[str, Any], str]] = None
 
         self.session_event_policy = SessionEventPolicy(
             session_policy_config,
@@ -380,6 +381,7 @@ class RtcStream(AsyncAudioVideoStreamHandler):
                 self.owns_session = False
                 logger.info(f"Session {session_id} created concurrently, reusing existing delegate")
 
+        self._apply_pending_device_info()
         factory.streams[session_id] = self
 
     async def emit(self) -> AudioEmitType:
@@ -712,6 +714,15 @@ class RtcStream(AsyncAudioVideoStreamHandler):
             },
         )
 
+    def _apply_pending_device_info(self) -> None:
+        if self.client_session_delegate is None or self._pending_device_info is None:
+            return
+        payload, request_id = self._pending_device_info
+        self._pending_device_info = None
+        logger.info(f"[{self.session_id}] Processing DeviceInfo received before session startup")
+        self._handle_device_info(payload, request_id)
+
+
     def _handle_music_status(self, payload: Dict[str, Any], request_id: str):
         if self.client_session_delegate is None:
             return
@@ -771,11 +782,17 @@ class RtcStream(AsyncAudioVideoStreamHandler):
                 message_name = header.get("name")
                 request_id = header.get("request_id") or str(uuid.uuid4())
 
-                if self.client_session_delegate is None:
-                    return
                 if message_name == "DeviceInfo":
                     logger.info(f'on_chat_datachannel: {message}')
+                    if self.client_session_delegate is None:
+                        self._pending_device_info = (dict(payload), request_id)
+                        logger.info(
+                            f"[{self.session_id}] DeviceInfo received before session startup; cached"
+                        )
+                        return
                     self._handle_device_info(payload, request_id)
+                    return
+                if self.client_session_delegate is None:
                     return
                 if message_name == "MusicStatus":
                     logger.info(f'on_chat_datachannel: {message}')
@@ -877,6 +894,7 @@ class RtcStream(AsyncAudioVideoStreamHandler):
         pass
     def shutdown(self):
         self.quit.set()
+        self._pending_device_info = None
         factory = None
         if self.weak_factory is not None:
             factory = self.weak_factory()

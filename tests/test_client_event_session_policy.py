@@ -264,6 +264,67 @@ def test_data_channel_dispatches_client_event_to_client_action():
     assert channel.sent[-1]["payload"]["code"] == "INVALID_CLIENT_EVENT"
 
 
+@pytest.mark.asyncio
+async def test_device_info_received_before_session_start_is_processed(monkeypatch):
+    stream = RtcStream(session_id="early-device-info", stream_start_delay=0)
+
+    class FakeChannel:
+        def __init__(self):
+            self.callbacks = {}
+            self.sent = []
+
+        def on(self, name):
+            def register(callback):
+                self.callbacks[name] = callback
+                return callback
+            return register
+
+        def send(self, payload):
+            self.sent.append(json.loads(payload))
+
+    delegate = DummyDelegate()
+    delegate.device_info = None
+
+    class FakeClientHandlerDelegate:
+        def find_session_delegate(self, _session_id):
+            return None
+
+        def start_session(self, **_kwargs):
+            return delegate
+
+    monkeypatch.setattr(
+        "service.rtc_service.rtc_stream.PersonaRuntimeResolver.resolve",
+        lambda _self, **_kwargs: {
+            "persona_id": "persona-1",
+            "face_image_path": "/tmp/persona-1.jpg",
+        },
+    )
+    stream.client_handler_delegate = FakeClientHandlerDelegate()
+    channel = FakeChannel()
+    stream.set_channel(channel)
+
+    channel.callbacks["message"](json.dumps({
+        "header": {"name": "DeviceInfo", "request_id": "device-info-early"},
+        "payload": {
+            "device_sn": "speaker-1",
+            "elder_id": "elder-1",
+            "persona_id": "persona-1",
+        },
+    }))
+
+    assert stream._pending_device_info is not None
+    assert channel.sent == []
+
+    await stream.start_up()
+
+    assert stream._pending_device_info is None
+    assert delegate.device_info["device_sn"] == "speaker-1"
+    assert delegate.shared_states.persona_runtime["persona_id"] == "persona-1"
+    assert channel.sent[-1]["header"]["name"] == "DeviceInfoAck"
+    assert channel.sent[-1]["header"]["request_id"] == "device-info-early"
+    assert channel.sent[-1]["payload"]["persona_active"] is True
+
+
 def test_policy_llm_json_parsing_for_exit_and_reminder_without_network():
     stream, _ = make_stream()
     responses = iter([

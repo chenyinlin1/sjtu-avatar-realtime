@@ -34,6 +34,7 @@ from chat_engine.data_models.runtime_data.data_bundle import DataBundle, DataBun
 from handlers.agent.agent_data_models import PerceptionData, EnvironmentEvent
 from handlers.agent.memory.session_memory_manager import SessionMemoryManager, MemoryConfig
 from handlers.agent.tools.tool_registry import ToolRegistry
+from handlers.agent.prompt.elder_profile_prompt import build_elder_profile_prompt
 from handlers.agent.prompt.prompt_compiler import (
     PromptCompiler,
     PromptInput,
@@ -682,6 +683,11 @@ class ChatAgentHandler(HandlerBase, ABC):
         if isinstance(runtime, dict) and runtime.get("persona_system_prompt"):
             runtime_snapshot = f"【当前角色】\n{runtime['persona_system_prompt']}"
             persona_snapshot = (persona_snapshot + "\n\n" + runtime_snapshot).strip()
+        elder_profile_snapshot = build_elder_profile_prompt(
+            getattr(context.shared_states, "device_info", None)
+        )
+        if elder_profile_snapshot:
+            persona_snapshot = (persona_snapshot + "\n\n" + elder_profile_snapshot).strip()
 
         # L3: 持续性环境状态快照
         env_state = ""
