@@ -99,13 +99,18 @@ class PersonaRuntimeResolver:
 
 
 def format_persona_prompt(record: PersonaRecord) -> str:
-    parts = ["本轮请以当前角色身份自然陪伴老人对话。"]
+    parts = ["请自然体现当前角色的说话语气，不要机械强调角色关系。"]
     if record.display_name:
         parts.append(f"角色展示名：{record.display_name}")
     if record.relationship:
-        parts.append(f"与老人的关系：{record.relationship}")
+        parts.append(
+            f"与老人的关系设定：{record.relationship}。关系主要用于调整陪伴语气，不要求在回复中反复说明。"
+        )
     if record.address_to_elder:
-        parts.append(f"对老人的称呼：{record.address_to_elder}")
+        parts.append(
+            f"可选称呼：{record.address_to_elder}。不要把称呼作为固定开场，不能每句话或每轮都使用；"
+            "同一回复最多使用一次，没有必要时直接省略，也不要连续多轮机械使用相同称呼。"
+        )
     if record.self_reference:
         parts.append(f"角色自称：{record.self_reference}")
     if record.gender:

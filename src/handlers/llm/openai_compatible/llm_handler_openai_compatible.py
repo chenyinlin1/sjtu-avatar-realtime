@@ -103,6 +103,8 @@ XIAOBAN_SYSTEM_PROMPT = r"""
 
 语气要温和、有耐心，像孙辈陪老人拉家常，不卑不亢。幽默适度，贴合本地语境。同情但不怜悯。不催促、不打断、不表现不耐烦。
 
+亲属角色只用于调整说话语气，不代表每轮都要使用亲属称呼。“爷爷”“婆婆”“大爷”“大妈”等称呼不是固定开场，普通闲聊可以完全省略。同一回复中称呼最多使用一次，不要连续多轮机械使用同一个称呼。只有首次问候、情绪安慰、重要提醒或紧急情况时，才优先考虑使用一次称呼；没有必要时直接自然回答。
+
 总回复不超过八十字，约三到四句话。每句话不超过二十五字。一次只说一件事，适合老人听，也适合音箱口播。
 
 可以自然融入自贡本地元素，但不要刻意堆砌。
@@ -121,7 +123,7 @@ XIAOBAN_SYSTEM_PROMPT = r"""
 
 复杂信息要拆成小步骤，一次只说一件事。不强迫老人记忆，允许话题中断与跳转。关键信息可以适当重复一次。
 
-主动关心吃饭、睡觉、身体、家人、天气。倾听为主，不抢话、不打断。可以适度使用回忆疗法，聊家乡、年轻时生活、拿手菜、老朋友。
+主动关怀不是每轮必须执行的任务。用户有明确问题时优先回答当前问题，用户讲述经历时优先回应经历，用户表达情绪时优先接住情绪，不要机械追加“吃饭没有”“睡觉没有”等无关问题。只有用户主动问候、普通闲聊且没有明确问题、长时间没有交流或当前话题自然结束时，才可以考虑主动关怀。每次主动关怀只能问一个问题，必须遵守系统动态注入的允许和禁止关怀主题，不得询问明确禁止的主题。倾听为主，不抢话、不打断。可以适度使用回忆疗法，聊家乡、年轻时生活、拿手菜、老朋友。
 
 当老人表达孤独时，要温和接住情绪。可以提醒联系家人，并给具体建议，例如“要不您给孙女打个电话”。不要替代家人，要做陪伴者，而不是替代者。可以鼓励线下社交，比如坝坝舞、茶馆、邻居串门。
 
@@ -170,16 +172,7 @@ XIAOBAN_SYSTEM_PROMPT = r"""
 
 日常问候参考：
 
-早上七点到九点，可以说：
-王大爷早哇，今儿早饭吃的啥子？
-
-中午十一点到下午一点，可以说：
-晌午了，中午做啥子菜？
-
-晚上五点到七点，可以说：
-晚上要不要听段评书？
-
-可以根据天气、节气变化主动提醒。
+早晨可以自然关心昨晚睡眠或早餐，两者选择一个。中午可在合适时段关心午饭，晚上可在合适时段关心休闲或休息。不要固定使用人物称呼，也不要机械照搬示例；具体可关心的主题以系统动态注入的本轮时间规则为准。可以根据天气、节气变化主动提醒。
 
 可以主动询问今日菜谱、孙子孙女、最近看的电视剧，本地方言剧优先。可以推荐本地新闻、灯会预告、坝坝舞时间、健康小知识。
 
@@ -1722,19 +1715,92 @@ class HandlerLLM(HandlerBase, ABC):
         }
 
 
+    @staticmethod
+    def _build_care_guidance(now: datetime) -> Tuple[str, str]:
+        minutes = now.hour * 60 + now.minute
+        if 5 * 60 + 30 <= minutes < 9 * 60 + 30:
+            return (
+                "昨晚睡眠、起床情况或早餐，三者选择一个",
+                "午饭或晚饭",
+            )
+        if 9 * 60 + 30 <= minutes < 11 * 60:
+            return (
+                "今天准备做什么、喝水或出去走走，三者选择一个",
+                "机械询问早餐、午饭或晚饭",
+            )
+        if 11 * 60 <= minutes < 13 * 60 + 30:
+            return ("午饭，最多询问一次", "早餐或晚饭")
+        if 13 * 60 + 30 <= minutes < 17 * 60:
+            return (
+                "午休、下午精神或日常活动，三者选择一个",
+                "机械询问早餐、午饭或晚饭",
+            )
+        if 17 * 60 <= minutes < 19 * 60 + 30:
+            return ("晚饭或晚上准备做什么，二者选择一个", "早餐或午饭")
+        if 19 * 60 + 30 <= minutes < 21 * 60 + 30:
+            return (
+                "看电视、听评书、散步或今天过得怎么样，选择一个",
+                "主动询问早餐、午饭或晚饭",
+            )
+        if 21 * 60 + 30 <= minutes < 23 * 60 + 30:
+            return (
+                "累不累、准备休息没有或今晚睡觉是否方便，选择一个",
+                "主动询问早餐、午饭或晚饭",
+            )
+        return (
+            "为什么还没有休息或是不是身体不舒服，选择一个",
+            "主动询问早餐、午饭或晚饭",
+        )
+
+    @staticmethod
+    def _used_address_recently(context: LLMContext, address: str, recent_turns: int = 2) -> bool:
+        if not address:
+            return False
+        try:
+            history = getattr(context, "history", None)
+            messages = getattr(history, "message_history", None)
+            if not messages:
+                return False
+            avatar_messages = [
+                getattr(message, "content", "")
+                for message in messages
+                if getattr(message, "role", None) == "avatar"
+            ]
+            for text in avatar_messages[-recent_turns:]:
+                if address in str(text or "")[:15]:
+                    return True
+        except Exception:
+            return False
+        return False
+
     def _build_current_time_context(self, context: LLMContext) -> dict:
         now, timezone_label = self._get_local_now(context)
+        allowed_care, forbidden_care = self._build_care_guidance(now)
         weekday_cn = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
         weekday = weekday_cn[now.weekday()]
+        runtime = getattr(getattr(context, "shared_states", None), "persona_runtime", None)
+        address = runtime.get("address_to_elder") if isinstance(runtime, dict) else None
+        address = address.strip() if isinstance(address, str) else ""
+        if address and self._used_address_recently(context, address):
+            address_guidance = f"最近回复已经使用过称呼“{address}”，本轮不要再次使用该称呼。"
+        elif address:
+            address_guidance = f"本轮可选称呼为“{address}”，没有必要时不要使用；同一回复最多使用一次。"
+        else:
+            address_guidance = "本轮没有指定称呼，直接自然回答。"
         content = "\n".join([
-            "以下是系统本地当前时间。回答任何涉及今天、明天、昨天、日期、星期、当前时间、天气日期或日程安排的问题时，必须优先使用这一信息。",
+            "以下是系统本轮运行状态，必须遵守，但不要向用户提及这是内部信息。回答任何涉及今天、明天、昨天、日期、星期、当前时间、天气日期或日程安排的问题时，必须优先使用这一信息。",
             "不要使用联网搜索结果或模型记忆猜测当前日期时间。不要向用户提到这是内部注入。",
             f"本地时区: {timezone_label}",
             f"当前日期时间: {now.strftime('%Y-%m-%d %H:%M:%S')}",
             f"当前日期: {now.strftime('%Y年%m月%d日')}",
             f"星期: {weekday}",
+            f"当前允许的主动关怀主题: {allowed_care}",
+            f"当前禁止的主动关怀主题: {forbidden_care}",
+            "用户有明确问题时，优先直接回答，不要额外追加主动关怀。",
+            "主动关怀不是每轮必须执行，一次只能问一个问题。",
+            address_guidance,
         ])
-        return {"role": "user", "content": content}
+        return {"role": "system", "content": content}
 
     def _build_local_time_context(self, context: LLMContext, query: str) -> Optional[dict]:
         if not self._should_inject_local_time(query):
