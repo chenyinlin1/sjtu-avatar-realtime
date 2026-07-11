@@ -14,11 +14,12 @@ def test_build_elder_profile_prompt_with_usage_boundaries():
         }
     )
 
-    assert "称呼：王奶奶" in prompt
+    assert "昵称：王奶奶" in prompt
     assert "性别：女" in prompt
     assert "年龄：78" in prompt
     assert "籍贯：四川成都" in prompt
     assert "仅按需参考" in prompt
+    assert "实际称呼优先遵循角色设定" in prompt
     assert "非必要不使用称呼" in prompt
     assert "不要每次回复都称呼用户" in prompt
     assert "固定的‘昵称+回答’开头" in prompt
