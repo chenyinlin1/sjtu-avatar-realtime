@@ -5,6 +5,7 @@ from fastapi.exceptions import RequestValidationError
 
 from chat_engine.chat_engine import OPEN_AVATAR_CHAT_VERSION
 
+from .asr import register_asr_routes
 from .personas.routes import register_persona_routes
 from .responses import (
     V1HTTPException,
@@ -42,3 +43,4 @@ def register_v1_adapter(app: FastAPI) -> None:
 
     register_persona_routes(app)
     register_tts_routes(app)
+    register_asr_routes(app)
