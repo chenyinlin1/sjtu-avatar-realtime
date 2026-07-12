@@ -57,14 +57,14 @@ default:
       SileroVad:
         module: vad/silerovad/duplex_vad_handler
         speaking_threshold: 0.55
-        start_delay: 256  #李思江2026.07.05调整，原为2048，调整为256
-        end_delay: 1500  #李思江2026.07.06调整，原为8000，调整为1500
-        early_end_delay: 16000    #李思江2026.07.06调整，原为3000，调整为16000
-        early_end_repeat_delay: 8000    #李思江2026.07.06调整，原为150，调整为8000
+        start_delay: 512  #王春昂2026.07.12调整，原为256，调整为512
+        end_delay: 8000  #王春昂2026.07.12调整，原为1500，调整为8000
+        early_end_delay: 4000    #王春昂2026.07.12调整，原为16000，调整为4000
+        early_end_repeat_delay: 4000    #王春昂2026.07.12调整，原为8000，调整为4000
         buffer_look_back: 5000   #李思江2026.07.06调整，原为8192，调整为5000
         speech_padding: 512   #李思江2026.07.06调整，原为2048，调整为512
         volume_threshold: -30 #李思江2026.07.06调整，原为-40，调整为-30
-        # post_end_monitor_samples: 8000
+        # post_end_monitor_samples: 8000 
         # reconnect_threshold_samples: 8000
         # post_end_energy_threshold: -30   #李思江2026.07.06调整，原为-5，调整为-30
       BailianASR:

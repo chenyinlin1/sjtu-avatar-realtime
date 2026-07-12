@@ -124,45 +124,6 @@ def test_format_persona_prompt_makes_relationship_and_address_optional():
     assert "不要提及 persona_id、内部配置、音色克隆或形象克隆" in prompt
 
 
-def test_system_prompt_includes_elder_profile_from_device_info():
-    context = SimpleNamespace(
-        system_prompt={"role": "system", "content": "基础提示词"},
-        shared_states=SimpleNamespace(
-            persona_runtime=None,
-            device_info={
-                "elder_profile": {
-                    "nickname": "王奶奶",
-                    "gender": "女",
-                    "age": 78,
-                    "native_place": "四川成都",
-                }
-            },
-        ),
-    )
-
-    message = HandlerLLM._system_prompt_for_context(context)
-
-    assert message["role"] == "system"
-    assert "基础提示词" in message["content"]
-    assert "【老人档案（仅按需参考）】" in message["content"]
-    assert "昵称：王奶奶" in message["content"]
-    assert "性别：女" in message["content"]
-    assert "年龄：78" in message["content"]
-    assert "籍贯：四川成都" in message["content"]
-
-
-def test_system_prompt_is_unchanged_without_elder_profile():
-    context = SimpleNamespace(
-        system_prompt={"role": "system", "content": "基础提示词"},
-        shared_states=SimpleNamespace(persona_runtime=None, device_info=None),
-    )
-
-    assert HandlerLLM._system_prompt_for_context(context) == {
-        "role": "system",
-        "content": "基础提示词",
-    }
-
-
 def test_current_time_context_is_system_message_and_blocks_reused_address(monkeypatch):
     context = SimpleNamespace(
         local_time_timezone="Asia/Shanghai",

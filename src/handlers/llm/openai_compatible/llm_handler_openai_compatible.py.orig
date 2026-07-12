@@ -26,7 +26,6 @@ from .scopemem_adapter import OpenAvatarScopeMemory
 from .search_engine import format_search_results, search_bocha
 from chat_engine.data_models.chat_stream_config import ChatStreamConfig
 from engine_utils.conversation_audit_logger import audit_event
-from handlers.agent.prompt.elder_profile_prompt import build_elder_profile_prompt
 
 
 MUSIC_ACTIVE_STATES = {"loading", "playing", "paused"}
@@ -1585,11 +1584,6 @@ class HandlerLLM(HandlerBase, ABC):
             persona_prompt = runtime.get("persona_system_prompt")
             if persona_prompt:
                 content = f"{content}\n\n【当前角色】\n{persona_prompt}"
-        elder_profile_prompt = build_elder_profile_prompt(
-            getattr(context.shared_states, "device_info", None)
-        )
-        if elder_profile_prompt:
-            content = f"{content}\n\n{elder_profile_prompt}"
         return {"role": base_prompt.get("role", "system"), "content": content}
 
     def on_signal(self, context: HandlerContext, signal: ChatSignal):
