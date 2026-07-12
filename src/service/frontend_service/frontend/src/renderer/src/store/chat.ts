@@ -27,7 +27,7 @@ type MusicClientAction =
     }
   | {
       type: 'music.control'
-      action?: 'pause' | 'resume' | 'next' | 'volume' | 'mute' | 'unmute' | 'stop' | string
+      action?: 'pause' | 'resume' | 'replay' | 'restart' | 'next' | 'volume' | 'mute' | 'unmute' | 'stop' | string
       delta?: number
     }
 
@@ -232,10 +232,6 @@ export const useChatStore = defineStore('chatStore', {
       audio.addEventListener('ended', () => {
         console.info('[music] audio ended', state())
         this.reportMusicStatus(this.buildMusicStatus('ended', 'play_ended', audio))
-        if (this.musicAudio === audio) {
-          this.musicAudio = null
-          this.clearMusicInfo()
-        }
       })
       this.musicAudio = audio
       this.reportMusicStatus(this.buildMusicStatus('loading', 'play_requested', audio))
@@ -293,6 +289,32 @@ export const useChatStore = defineStore('chatStore', {
           this.reportMusicStatus(this.buildMusicStatus('stopped', 'stop_control', audio))
           this.musicAudio = null
           this.clearMusicInfo()
+          break
+        case 'replay':
+        case 'restart':
+          if (!audio) {
+            this.reportMusicStatus(this.buildMusicStatus('error', 'replay_failed', null, 'no recent music audio'))
+            break
+          }
+          try {
+            audio.currentTime = 0
+            audio.play()
+              .then(() => {
+                console.info('[music] replay promise resolved', musicAudioState(audio))
+                this.reportMusicStatus(this.buildMusicStatus('playing', 'replay_control', audio))
+              })
+              .catch((e) => {
+                console.error('[music] replay failed', { ...musicErrorInfo(e), ...musicAudioState(audio) })
+                this.reportMusicStatus(
+                  this.buildMusicStatus('error', 'replay_failed', audio, musicErrorInfo(e).message)
+                )
+              })
+          } catch (e) {
+            console.error('[music] replay setup failed', { ...musicErrorInfo(e), ...musicAudioState(audio) })
+            this.reportMusicStatus(
+              this.buildMusicStatus('error', 'replay_failed', audio, musicErrorInfo(e).message)
+            )
+          }
           break
         case 'next':
           if (audio) {

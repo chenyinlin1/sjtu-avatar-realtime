@@ -23,9 +23,9 @@ class MusicControlTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "音乐播放器控制工具。当用户表达控制当前音乐/音频时使用，包括暂停、继续/恢复、停止/关闭/退出播放、上一首、下一首、音量调大/调小、静音、取消静音。"
+            "音乐播放器控制工具。当用户表达控制当前音乐/音频时使用，包括暂停、继续/恢复、重播/从头播放、停止/关闭/退出播放、上一首、下一首、音量调大/调小、静音、取消静音。"
             "口语、四川话或 ASR 近似表达也应识别，例如“停一哈”“莫放了”“不听了”“不想听这首”“接倒放”“声音小点”。"
-            "其中“不听了”“不想听这首”“莫放了”“别放了”“关了”应返回 action=stop；“暂停”“停一哈”应返回 action=pause；“接倒放”“继续放”应返回 action=resume。"
+            "其中“不听了”“不想听这首”“莫放了”“别放了”“关了”应返回 action=stop；“暂停”“停一哈”应返回 action=pause；“接倒放”“继续放”应返回 action=resume；“重播”“重放”“重新播放”“再放一遍”应返回 action=replay。"
             "若用户是在点歌、搜索音乐、推荐歌曲、询问歌词或闲聊，不应调用该工具。"
             "工具只返回结构化控制动作，实际播放控制由前端播放器执行。"
         )
@@ -37,7 +37,7 @@ class MusicControlTool(BaseTool):
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["stop", "pause", "resume", "next", "volume", "mute", "unmute"],
+                    "enum": ["stop", "pause", "resume", "replay", "restart", "next", "volume", "mute", "unmute"],
                     "description": "播放器控制动作。",
                 },
                 "delta": {
@@ -50,12 +50,14 @@ class MusicControlTool(BaseTool):
 
     def execute(self, args: Dict[str, Any]) -> ToolResult:
         action = str(args.get("action", "")).strip().lower()
-        if action not in {"stop", "pause", "resume", "next", "volume", "mute", "unmute"}:
+        if action == "restart":
+            action = "replay"
+        if action not in {"stop", "pause", "resume", "replay", "next", "volume", "mute", "unmute"}:
             return ToolResult(success=False, error=f"Unsupported music control action: {action}")
         data = {
             "type": "music.control",
             "action": action,
-            "hints": ["停止", "暂停", "继续", "下一首", "音量小一点"],
+            "hints": ["停止", "暂停", "继续", "重播", "下一首", "音量小一点"],
         }
         if action == "volume":
             try:

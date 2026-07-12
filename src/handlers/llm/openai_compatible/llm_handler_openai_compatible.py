@@ -1327,7 +1327,7 @@ class HandlerLLM(HandlerBase, ABC):
                 continue
             data = result.get("data") or {}
             if result.get("name") == "music_control" or data.get("type") == "music.control":
-                if data.get("action") == "stop":
+                if data.get("action") in {"stop", "replay"}:
                     return True
         return False
 
@@ -1405,12 +1405,14 @@ class HandlerLLM(HandlerBase, ABC):
                 if action == "stop":
                     HandlerLLM._set_music_player_active(context, False)
                     HandlerLLM._mark_shared_music_status(context, "stopped", "server_control_stop")
-                elif action in {"pause", "resume", "next", "volume", "mute", "unmute"}:
+                elif action in {"pause", "resume", "replay", "next", "volume", "mute", "unmute"}:
                     HandlerLLM._set_music_player_active(context, True)
                     if action == "pause":
                         HandlerLLM._mark_shared_music_status(context, "paused", "server_control_pause")
                     elif action == "resume":
                         HandlerLLM._mark_shared_music_status(context, "playing", "server_control_resume")
+                    elif action == "replay":
+                        HandlerLLM._mark_shared_music_status(context, "loading", "server_control_replay")
 
                 output = DataBundle(output_definition)
                 output.set_main_data("")
@@ -1418,7 +1420,7 @@ class HandlerLLM(HandlerBase, ABC):
                     "type": "music.control",
                     "action": action,
                     "delta": data.get("delta"),
-                    "hints": data.get("hints") or ["停止", "暂停", "继续", "下一首", "音量小一点"],
+                    "hints": data.get("hints") or ["停止", "暂停", "继续", "重播", "下一首", "音量小一点"],
                 })
                 streamer.stream_data(output)
                 logger.info(
@@ -2006,6 +2008,8 @@ class HandlerLLM(HandlerBase, ABC):
             return active or HandlerLLM._is_explicit_music_stop_text(text)
         if action == "pause":
             return active or state in MUSIC_DIRECT_PAUSE_STATES
+        if action == "replay":
+            return active or state == "ended"
         if action in {"resume", "next", "volume", "mute", "unmute"}:
             return active
         return False
@@ -2126,6 +2130,21 @@ class HandlerLLM(HandlerBase, ABC):
     "站停一下")
         ):
             return {"action": "pause"}
+        if any(
+            keyword in compact for keyword in (
+                "重播",
+                "重放",
+                "重新播放",
+                "重新放",
+                "从头播放",
+                "从头放",
+                "从头再来",
+                "再听一遍",
+                "再放一遍",
+                "再播一遍",
+            )
+        ):
+            return {"action": "replay"}
         if compact in {"继续", "恢复"} or any(
             keyword in compact for keyword in (
     "继续放",
@@ -2271,10 +2290,12 @@ class HandlerLLM(HandlerBase, ABC):
         if action == "stop":
             HandlerLLM._set_music_player_active(context, False)
             HandlerLLM._mark_shared_music_status(context, "stopped", "server_control_stop")
-        elif action in {"pause", "resume", "next", "volume", "mute", "unmute"}:
+        elif action in {"pause", "resume", "replay", "next", "volume", "mute", "unmute"}:
             HandlerLLM._set_music_player_active(context, True)
             if action == "pause":
                 HandlerLLM._mark_shared_music_status(context, "paused", "server_control_pause")
+            elif action == "replay":
+                HandlerLLM._mark_shared_music_status(context, "loading", "server_control_replay")
             elif action == "resume":
                 HandlerLLM._mark_shared_music_status(context, "playing", "server_control_resume")
         output = DataBundle(output_definition)
@@ -2283,7 +2304,7 @@ class HandlerLLM(HandlerBase, ABC):
             "type": "music.control",
             "action": action,
             "delta": control.get("delta"),
-            "hints": ["暂停", "继续", "下一首", "音量小一点"],
+            "hints": ["暂停", "继续", "重播", "下一首", "音量小一点"],
         })
         streamer.stream_data(output)
         logger.info(
