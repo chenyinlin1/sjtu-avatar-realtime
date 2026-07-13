@@ -8,6 +8,7 @@ from threading import Event
 
 from chat_engine.data_models.chat_signal_type import ChatSignalType
 from handlers.client.ws_client.ws_message_protocol import ClientEvent, parse_message
+from handlers.agent.tools.reminder.pending_actions import get_pending_action_registry
 from service.rtc_service.rtc_stream import RtcStream
 from service.rtc_service.session_event_policy import SessionEventPolicyConfig
 
@@ -142,7 +143,8 @@ def test_reminder_capture_emits_create_and_ack_confirms_after_success():
 
     create_action = action_from(sent[0])
     assert create_action["type"] == "reminder.create"
-    assert create_action["title"] == "吃药"
+    assert create_action["args"]["title"] == "吃药"
+    assert create_action["args"]["repeat"] == "none"
     assert stream.session_event_policy._reminder_capture_inflight is False
 
     stream._handle_client_event(
@@ -152,6 +154,32 @@ def test_reminder_capture_emits_create_and_ack_confirms_after_success():
     confirmation = action_from(sent[1])
     assert confirmation["type"] == "say"
     assert confirmation["reason"] == "reminder_create_ack"
+
+
+def test_action_ack_is_matched_without_sending_duplicate_fixed_speech():
+    stream, sent = make_stream()
+    registry = get_pending_action_registry(
+        stream.client_session_delegate.shared_states,
+        stream.session_id,
+    )
+    registry.register("action-1", "reminder.create")
+
+    ack = event_payload(
+        "action_ack",
+        {"action_id": "action-1", "ok": True, "entity_id": 123, "error": None},
+    )
+    stream._handle_client_event(ack, "evt-action-ack")
+    result = registry.wait("action-1", timeout=0.01)
+
+    assert result.ok is True
+    assert result.entity_id == 123
+    assert sent == []
+    stream._handle_client_event(ack, "evt-action-ack-duplicate")
+    stream._handle_client_event(
+        event_payload("action_ack", {"action_id": "unknown", "ok": True}),
+        "evt-action-ack-unknown",
+    )
+    assert sent == []
 
 
 def test_failed_reminder_extraction_asks_user_to_repeat_instead_of_claiming_success():
@@ -397,6 +425,11 @@ def test_device_info_parses_elder_profile(monkeypatch):
                 "age": 78,
                 "native_place": " 四川成都 ",
                 "ignored": "value",
+                "reminders": [
+                    {"id": 123, "title": " 吃药 ", "remind_at": 1_800_000_000_000},
+                    {"id": "bad", "title": "忽略", "remind_at": 1_800_000_000_000},
+                    {"id": 124, "title": "", "remind_at": 1_800_000_000_000},
+                ],
             },
         },
         "device-info-1",
@@ -407,6 +440,7 @@ def test_device_info_parses_elder_profile(monkeypatch):
         "gender": "女",
         "age": 78,
         "native_place": "四川成都",
+        "reminders": [{"id": 123, "title": "吃药", "remind_at": 1_800_000_000_000}],
     }
     assert stream.client_session_delegate.device_info["elder_profile"] == expected
     assert stream.client_session_delegate.shared_states.device_info["elder_profile"] == expected

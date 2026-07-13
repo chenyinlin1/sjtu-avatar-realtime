@@ -143,6 +143,7 @@ default:
           - "handlers.agent.tools.web_search"
           - "handlers.agent.tools.music_request"
           - "handlers.agent.tools.music_control"
+          - "handlers.agent.tools.reminder"
         tool_choice: "auto"
         strict_tool_schema: false
         # bocha_api_key: "" # default=os.getenv("BOCHA_API_KEY")

@@ -35,6 +35,11 @@ from handlers.agent.agent_data_models import PerceptionData, EnvironmentEvent
 from handlers.agent.memory.session_memory_manager import SessionMemoryManager, MemoryConfig
 from handlers.agent.tools.tool_registry import ToolRegistry
 from handlers.agent.prompt.elder_profile_prompt import build_elder_profile_prompt
+from handlers.agent.tools.reminder.fulfillment import (
+    fulfill_reminder_action,
+    is_pending_reminder_result,
+)
+from handlers.agent.tools.reminder.pending_actions import close_pending_action_registry
 from handlers.agent.prompt.prompt_compiler import (
     PromptCompiler,
     PromptInput,
@@ -173,6 +178,7 @@ class ToolUseConfig(BaseModel):
         default_factory=lambda: [
             "handlers.agent.tools.demo_tools",
             "handlers.agent.tools.web_search",
+            "handlers.agent.tools.reminder",
         ],
         description="要自动加载的工具模块。模块可暴露 register_tools 或 get_tools。",
     )
@@ -346,7 +352,7 @@ class ChatAgentHandler(HandlerBase, ABC):
 
         context.memory = SessionMemoryManager(config=context.config.to_memory_config())
         context.compiler = self._build_compiler(context.config)
-        context.tool_registry = self._build_tool_registry(context.config)
+        context.tool_registry = self._build_tool_registry(context.config, context=context)
 
         # OC Bridge initialization
         if context.config.oc_bridge.enabled:
@@ -889,14 +895,44 @@ class ChatAgentHandler(HandlerBase, ABC):
                     )
 
                 result = registry.execute(tc["name"], args)
+                result_content = result.to_content_str()
+                if result.success and is_pending_reminder_result(result.data):
+                    def send_action(client_action):
+                        output = DataBundle(output_definition)
+                        output.set_main_data("")
+                        output.add_meta("client_action", client_action)
+                        streamer.stream_data(output)
+
+                    try:
+                        outcome = fulfill_reminder_action(
+                            shared_states=context.shared_states,
+                            session_id=context.session_id,
+                            pending_data=result.data,
+                            send_action=send_action,
+                        )
+                    except Exception as exc:
+                        logger.opt(exception=exc).warning(
+                            f"[ChatAgent] reminder fulfillment failed: {tc['name']}"
+                        )
+                        outcome = {
+                            "ok": False,
+                            "status": "failed",
+                            "error": "reminder fulfillment failed",
+                            "error_code": "FULFILLMENT_FAILED",
+                        }
+                    result_content = json.dumps(outcome, ensure_ascii=False)
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc["id"],
-                    "content": result.to_content_str(),
+                    "content": result_content,
                 })
+                logged_result = (
+                    "<redacted reminder result>"
+                    if tc["name"] == "manage_reminder"
+                    else result_content[:120]
+                )
                 logger.info(
-                    f"[ChatAgent]   tool={tc['name']} → "
-                    f"{result.to_content_str()[:120]}"
+                    f"[ChatAgent]   tool={tc['name']} → {logged_result}"
                 )
 
             if interrupted_during_tools:
@@ -1200,7 +1236,7 @@ class ChatAgentHandler(HandlerBase, ABC):
     # ── ToolRegistry 构建 ──
 
     @staticmethod
-    def _build_tool_registry(config: ChatAgentConfig) -> ToolRegistry:
+    def _build_tool_registry(config: ChatAgentConfig, context: Optional[ChatAgentContext] = None) -> ToolRegistry:
         registry = ToolRegistry(
             strict_schema=config.tool_use.strict_schema,
             enabled_tools=config.tool_use.enabled_tools,
@@ -1215,7 +1251,7 @@ class ChatAgentHandler(HandlerBase, ABC):
                     if m != "handlers.agent.tools.demo_tools"
                 ]
             from handlers.agent.tools.tool_loader import load_tool_modules
-            load_tool_modules(registry, modules, config=config)
+            load_tool_modules(registry, modules, config=config, context=context)
 
         logger.info(
             f"[ChatAgent] ToolRegistry initialized with {len(registry.tool_names)} tools: "
@@ -1365,6 +1401,7 @@ class ChatAgentHandler(HandlerBase, ABC):
 
     def destroy_context(self, context: HandlerContext):
         context = cast(ChatAgentContext, context)
+        close_pending_action_registry(context.shared_states)
         context._idle_stop.set()
         if context.oc_channel_client:
             try:

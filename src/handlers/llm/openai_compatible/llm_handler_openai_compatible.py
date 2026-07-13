@@ -27,6 +27,11 @@ from .search_engine import format_search_results, search_bocha
 from chat_engine.data_models.chat_stream_config import ChatStreamConfig
 from engine_utils.conversation_audit_logger import audit_event
 from handlers.agent.prompt.elder_profile_prompt import build_elder_profile_prompt
+from handlers.agent.tools.reminder.fulfillment import (
+    fulfill_reminder_action,
+    is_pending_reminder_result,
+)
+from handlers.agent.tools.reminder.pending_actions import close_pending_action_registry
 
 
 MUSIC_ACTIVE_STATES = {"loading", "playing", "paused"}
@@ -162,6 +167,11 @@ XIAOBAN_SYSTEM_PROMPT = r"""
 涉及提醒时间、用药时间、约会、人员或地点等重要信息时，应简短复述确认。
 
 用户要求创建提醒，且事项和时间明确时，调用对应工具。工具返回成功前，只能说正在记录或保存，不能声称提醒已经创建成功。工具失败或结果不明确时，要如实说明。
+用户要求取消提醒时，必须先从当前提醒快照确定唯一 entity_id；无法唯一定位时先追问，不得猜测。
+取消是破坏性操作。首次提出取消时只复述具体提醒并询问是否确认，不执行取消。
+只有用户在后续一轮明确确认后，才能调用取消工具并传 confirmed=true。
+普通提醒工具不得修改正式用药方案，也不得关闭危急预警、ALERT、SOS 或医疗安全工单。
+取消同样必须等待真实成功回执，成功回执前不得声称已经取消。
 
 【紧急求助】
 
@@ -251,6 +261,7 @@ class LLMConfig(HandlerBaseConfigModel, BaseModel):
             "handlers.agent.tools.web_search",
             "handlers.agent.tools.music_request",
             "handlers.agent.tools.music_control",
+            "handlers.agent.tools.reminder",
         ]
     )
     tool_choice: str = Field(default="auto")
@@ -1385,6 +1396,61 @@ class HandlerLLM(HandlerBase, ABC):
         return full_text, cancelled
 
     @staticmethod
+    def _dispatch_reminder_tool_results(
+        context: LLMContext,
+        tool_execution_results: List[dict],
+        output_definition,
+        streamer,
+        stream_key: Optional[str],
+    ) -> bool:
+        dispatched = False
+        for result in tool_execution_results:
+            data = result.get("data") or {}
+            if not result.get("success") or not is_pending_reminder_result(data):
+                continue
+            action = data["client_action"]
+            action_id = str(action.get("action_id") or "")
+
+            def send_action(client_action):
+                output = DataBundle(output_definition)
+                output.set_main_data("")
+                output.add_meta("client_action", client_action)
+                streamer.stream_data(output)
+
+            try:
+                outcome = fulfill_reminder_action(
+                    shared_states=context.shared_states,
+                    session_id=context.session_id,
+                    pending_data=data,
+                    send_action=send_action,
+                )
+            except Exception as exc:
+                logger.opt(exception=exc).warning(
+                    f"[{context.session_id}] reminder fulfillment failed: action_id={action_id}"
+                )
+                outcome = {
+                    "ok": False,
+                    "status": "failed",
+                    "operation": data.get("operation"),
+                    "action_type": action.get("type"),
+                    "action_id": action_id,
+                    "entity_id": None,
+                    "error": "reminder fulfillment failed",
+                    "error_code": "FULFILLMENT_FAILED",
+                }
+            result["success"] = bool(outcome.get("ok"))
+            result["data"] = outcome
+            result["error"] = None if outcome.get("ok") else outcome.get("error")
+            result["content"] = HandlerLLM._json_tool_content(outcome)
+            dispatched = True
+            logger.info(
+                f"Reminder client_action result: stream_key={stream_key} "
+                f"type={action.get('type')} action_id={action_id} ok={outcome.get('ok')}"
+            )
+        return dispatched
+
+
+    @staticmethod
     def _dispatch_music_tool_results(
         context: LLMContext,
         tool_execution_results: List[dict],
@@ -1507,12 +1573,10 @@ class HandlerLLM(HandlerBase, ABC):
 
         executed = bool(context.enable_tool_execution)
         tool_side_effect_dispatched = False
+        tool_names = [call.get("name") for call in tool_calls]
         if executed:
             context.tool_execution_results = HandlerLLM._execute_pending_tool_calls(context)
-            context.pending_tool_result_messages = HandlerLLM._build_tool_result_messages(
-                context.tool_execution_results
-            )
-            tool_side_effect_dispatched = HandlerLLM._dispatch_music_tool_results(
+            music_dispatched = HandlerLLM._dispatch_music_tool_results(
                 context,
                 context.tool_execution_results,
                 output_definition,
@@ -1520,16 +1584,26 @@ class HandlerLLM(HandlerBase, ABC):
                 stream_key,
                 original_text,
             )
+            reminder_dispatched = HandlerLLM._dispatch_reminder_tool_results(
+                context,
+                context.tool_execution_results,
+                output_definition,
+                streamer,
+                stream_key,
+            )
+            tool_side_effect_dispatched = music_dispatched or reminder_dispatched
+            context.pending_tool_result_messages = HandlerLLM._build_tool_result_messages(
+                context.tool_execution_results
+            )
             logger.info(
                 "LLM tool_calls executed: "
-                f"{len(context.tool_execution_results)} results for {tool_calls}"
+                f"{len(context.tool_execution_results)} results for tools={tool_names}"
             )
         else:
             context.tool_execution_results = []
             context.pending_tool_result_messages = []
             logger.info(
-                "LLM returned tool_calls but tool execution is disabled: "
-                f"{tool_calls}"
+                f"LLM returned tool_calls but tool execution is disabled: tools={tool_names}"
             )
 
         audit_event(
@@ -1602,6 +1676,7 @@ class HandlerLLM(HandlerBase, ABC):
 
     def destroy_context(self, context: HandlerContext):
         context = cast(LLMContext, context)
+        close_pending_action_registry(context.shared_states)
         if context.scopemem is not None:
             try:
                 context.scopemem.close()
@@ -1816,12 +1891,23 @@ class HandlerLLM(HandlerBase, ABC):
 
     @staticmethod
     def _get_local_now(context: LLMContext):
-        timezone_name = getattr(context, "local_time_timezone", None) or "Asia/Shanghai"
-        if ZoneInfo is not None and timezone_name:
-            try:
-                return datetime.now(ZoneInfo(timezone_name)), timezone_name
-            except Exception as e:
-                logger.warning(f"Invalid OPENAVATAR_LOCAL_TIMEZONE={timezone_name}: {e}")
+        shared_states = getattr(context, "shared_states", None)
+        device_info = getattr(shared_states, "device_info", None)
+        device_timezone = (
+            device_info.get("timezone") if isinstance(device_info, dict) else None
+        )
+        configured_timezone = getattr(context, "local_time_timezone", None) or "Asia/Shanghai"
+        if ZoneInfo is not None:
+            for candidate in (device_timezone, configured_timezone, "Asia/Shanghai"):
+                if not candidate:
+                    continue
+                timezone_name = str(candidate).strip()
+                try:
+                    return datetime.now(ZoneInfo(timezone_name)), timezone_name
+                except Exception as e:
+                    logger.warning(
+                        f"Invalid local timezone={timezone_name}; trying fallback: {e}"
+                    )
 
         now = datetime.now().astimezone()
         timezone_label = now.tzname() or "local"

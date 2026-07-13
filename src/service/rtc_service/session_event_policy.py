@@ -5,7 +5,6 @@ while RTC transport remains in ``rtc_stream.py`` and is injected through small c
 """
 
 import time
-import uuid
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from threading import RLock
@@ -15,6 +14,7 @@ from loguru import logger
 from pydantic import BaseModel, Field, model_validator
 
 from service.rtc_service.session_event_semantics import SessionEventSemanticResolver
+from handlers.agent.tools.reminder.action_builder import build_create_action
 
 
 _EVENT_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="client-event")
@@ -58,12 +58,14 @@ class SessionEventPolicy:
         send_action: Callable[[Dict[str, Any], Optional[str]], None],
         emit_interrupt: Callable[[str], None],
         runtime_snapshot: Callable[[], Dict[str, Any]],
+        handle_action_ack: Optional[Callable[[Dict[str, Any]], str]] = None,
     ):
         self.config = SessionEventPolicyConfig.model_validate(config or {}).model_dump()
         self._session_id = session_id
         self._send_action = send_action
         self._emit_interrupt = emit_interrupt
         self._runtime_snapshot = runtime_snapshot
+        self._handle_action_ack_callback = handle_action_ack
         self._lock = RLock()
         self._handled_ids: Deque[str] = deque()
         self._handled_id_set: Set[str] = set()
@@ -110,6 +112,7 @@ class SessionEventPolicy:
             "reminder_capture": self._handle_reminder_capture,
             "reminder_due": self._handle_reminder_due,
             "reminder_ack": self._handle_reminder_ack,
+            "action_ack": self._handle_action_ack,
         }
         if event_type == "wake":
             self.note_user_activity("wake")
@@ -304,14 +307,34 @@ class SessionEventPolicy:
                 "reason": "reminder_capture_failed",
             }, request_id)
             return
-        action_id = f"rem-{uuid.uuid4().hex}"
-        action = {"type": "reminder.create", "action_id": action_id, **reminder}
+        action = build_create_action(
+            title=reminder["title"],
+            remind_at_ms=reminder["remind_at"],
+            repeat=reminder.get("repeat") or "none",
+            speak_text=reminder.get("speak_text"),
+        )
+        action_id = action["action_id"]
         with self._lock:
             while len(self._pending_reminder_actions) >= 32:
                 oldest = next(iter(self._pending_reminder_actions))
                 self._pending_reminder_actions.pop(oldest, None)
             self._pending_reminder_actions[action_id] = reminder["title"]
         self._send_action(action, request_id)
+
+    def _handle_action_ack(self, data: Dict[str, Any], request_id: str) -> None:
+        """Resolve the v1 §10 ack; fall back only for legacy reminder_capture actions."""
+        status = "unknown"
+        if self._handle_action_ack_callback is not None:
+            try:
+                status = self._handle_action_ack_callback(data)
+            except Exception as exc:
+                logger.opt(exception=exc).warning(
+                    f"[{self._session_id()}] action_ack dispatch failed"
+                )
+                status = "error"
+        if status in {"matched", "duplicate", "closed", "invalid", "error"}:
+            return
+        self._handle_reminder_ack(data, request_id)
 
     def _handle_reminder_ack(self, data: Dict[str, Any], request_id: str) -> None:
         raw_action_id = data.get("action_id")

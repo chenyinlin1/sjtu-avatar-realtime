@@ -34,6 +34,7 @@ from handlers.client.ws_client.ws_message_protocol import (
 from service.v1_adapter.personas.runtime import PersonaRuntimeError, PersonaRuntimeResolver
 from engine_utils.conversation_audit_logger import audit_event
 from service.rtc_service.session_event_policy import SessionEventPolicy
+from handlers.agent.tools.reminder.pending_actions import get_pending_action_registry
 
 
 _AV_SYNC_DIAG = os.getenv("AV_SYNC_DIAG", "").lower() in {"1", "true", "yes", "on"}
@@ -124,6 +125,7 @@ class RtcStream(AsyncAudioVideoStreamHandler):
             send_action=self._send_client_action,
             emit_interrupt=self._emit_policy_interrupt,
             runtime_snapshot=self._session_policy_runtime_snapshot,
+            handle_action_ack=self._resolve_action_ack,
         )
         self.session_policy_config = dict(self.session_event_policy.config)
 
@@ -190,6 +192,23 @@ class RtcStream(AsyncAudioVideoStreamHandler):
 
     def _handle_client_event(self, payload: Dict[str, Any], request_id: str) -> None:
         self.session_event_policy.handle_client_event(payload, request_id)
+
+    def _resolve_action_ack(self, data: Dict[str, Any]) -> str:
+        delegate = self.client_session_delegate
+        shared_states = getattr(delegate, "shared_states", None)
+        registry = get_pending_action_registry(
+            shared_states,
+            str(self.session_id or "unknown"),
+            create=False,
+        )
+        if registry is None:
+            action_id = str(data.get("action_id") or "").strip()
+            logger.info(
+                f"[{self.session_id}] unknown action_ack ignored without registry: "
+                f"action_id={action_id or '-'}"
+            )
+            return "unknown"
+        return registry.resolve(data)
 
     def _av_sync_audio_ms(self) -> float:
         if self.output_sample_rate <= 0:
@@ -640,6 +659,26 @@ class RtcStream(AsyncAudioVideoStreamHandler):
                 "age": raw_elder_profile.get("age"),
                 "native_place": optional_text(raw_elder_profile.get("native_place")),
             }
+            raw_reminders = raw_elder_profile.get("reminders")
+            if isinstance(raw_reminders, list):
+                reminders = []
+                for raw_reminder in raw_reminders[:50]:
+                    if not isinstance(raw_reminder, dict):
+                        continue
+                    try:
+                        reminder_id = int(raw_reminder.get("id"))
+                        remind_at = int(raw_reminder.get("remind_at"))
+                    except (TypeError, ValueError):
+                        continue
+                    title = optional_text(raw_reminder.get("title"))
+                    if reminder_id <= 0 or remind_at <= 0 or not title:
+                        continue
+                    reminders.append({
+                        "id": reminder_id,
+                        "title": title[:100],
+                        "remind_at": remind_at,
+                    })
+                elder_profile["reminders"] = reminders
 
         device_info = {
             "device_sn": device_sn,
