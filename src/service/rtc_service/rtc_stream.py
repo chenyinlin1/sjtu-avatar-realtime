@@ -45,14 +45,13 @@ try:
 except ValueError:
     _AV_SYNC_DIAG_EVERY = 1
 try:
-    _AV_SYNC_VIDEO_LEAD_LIMIT_MS = max(
+    _AV_SYNC_RTP_VIDEO_LEAD_LIMIT_MS = max(
         0.0,
-        float(os.getenv("AV_SYNC_VIDEO_LEAD_LIMIT_MS", "180")),
+        float(os.getenv("AV_SYNC_RTP_VIDEO_LEAD_LIMIT_MS", "40")),
     )
 except ValueError:
-    _AV_SYNC_VIDEO_LEAD_LIMIT_MS = 180.0
-_AV_SYNC_VIDEO_WARN_LIMIT_MS = 200.0
-_AV_SYNC_WAIT_INTERVAL_S = 0.005
+    _AV_SYNC_RTP_VIDEO_LEAD_LIMIT_MS = 40.0
+_AV_SYNC_RTP_WAIT_INTERVAL_S = 0.005
 
 
 def _get_h264_encoder_info():
@@ -107,15 +106,15 @@ class RtcStream(AsyncAudioVideoStreamHandler):
         self._av_diag_audio_emit_seq = 0
         self._av_diag_video_emit_seq = 0
         self._av_diag_audio_samples_total = 0
-        self._av_sync_audio_samples_total = 0
-        self._av_sync_video_frames_total = 0
-        self._av_sync_video_lead_limit_ms = _AV_SYNC_VIDEO_LEAD_LIMIT_MS
+        self._av_diag_audio_rtp_seq = 0
+        self._av_diag_video_rtp_seq = 0
+        self._av_rtp_audio_ms: Optional[float] = None
+        self._av_rtp_video_ms: Optional[float] = None
+        self._av_rtp_video_lead_limit_ms = _AV_SYNC_RTP_VIDEO_LEAD_LIMIT_MS
         self._av_sync_reset_requested = False
         self._av_sync_reset_reason = ""
         self._av_sync_reset_target_speech_id: Optional[str] = None
-        self._av_sync_reset_wait_for_audio = True
         self._av_sync_current_speech_id: Optional[str] = None
-        self._av_sync_wait_for_first_audio = False
         self._input_gate_drop_logged = False
         self._pending_device_info: Optional[tuple[Dict[str, Any], str]] = None
 
@@ -141,10 +140,7 @@ class RtcStream(AsyncAudioVideoStreamHandler):
         shared_states = getattr(delegate, "shared_states", None)
         return {
             "music_active": bool(getattr(shared_states, "music_player_active", False)),
-            "avatar_output_active": (
-                self._av_sync_current_speech_id is not None
-                or self._av_sync_wait_for_first_audio
-            ),
+            "avatar_output_active": self._av_sync_current_speech_id is not None,
             "device_info": getattr(delegate, "device_info", None),
             "closed": self.quit.is_set(),
         }
@@ -210,44 +206,27 @@ class RtcStream(AsyncAudioVideoStreamHandler):
             return "unknown"
         return registry.resolve(data)
 
-    def _av_sync_audio_ms(self) -> float:
-        if self.output_sample_rate <= 0:
-            return 0.0
-        return self._av_sync_audio_samples_total / self.output_sample_rate * 1000
-
-    def _av_sync_video_ms(self, frame_count: Optional[int] = None) -> float:
-        if self.fps <= 0:
-            return 0.0
-        if frame_count is None:
-            frame_count = self._av_sync_video_frames_total
-        return frame_count / self.fps * 1000
-
     def request_av_sync_reset(
         self,
         reason: str = "",
         target_speech_id: Optional[str] = None,
-        wait_for_audio: bool = True,
     ) -> None:
-        """Request queue/counter reset from the RTC emit loop."""
+        """Request stale RTC output cleanup from the emit loop."""
         self._av_sync_reset_requested = True
         self._av_sync_reset_reason = reason or "unspecified"
         self._av_sync_reset_target_speech_id = target_speech_id
-        self._av_sync_reset_wait_for_audio = wait_for_audio
 
     def finish_av_sync_playback(self, reason: str = "") -> None:
         """Clear current playback speech tracking when a CLIENT_PLAYBACK stream ends."""
         previous_speech_id = self._av_sync_current_speech_id
-        was_waiting = self._av_sync_wait_for_first_audio
         self._av_sync_reset_requested = False
         self._av_sync_reset_reason = ""
         self._av_sync_reset_target_speech_id = None
-        self._av_sync_reset_wait_for_audio = True
         self._av_sync_current_speech_id = None
-        self._av_sync_wait_for_first_audio = False
-        if previous_speech_id is not None or was_waiting:
+        if previous_speech_id is not None:
             logger.info(
                 f"AV_SYNC_RTC_PLAYBACK_FINISH session={self.session_id} reason={reason or 'unspecified'} "
-                f"previous_speech_id={previous_speech_id} was_waiting={was_waiting}"
+                f"previous_speech_id={previous_speech_id}"
             )
 
     def _chat_data_speech_id(self, chat_data: ChatData) -> Optional[str]:
@@ -272,11 +251,9 @@ class RtcStream(AsyncAudioVideoStreamHandler):
 
         reason = self._av_sync_reset_reason or "unspecified"
         target_speech_id = self._av_sync_reset_target_speech_id
-        wait_for_audio = self._av_sync_reset_wait_for_audio
         self._av_sync_reset_requested = False
         self._av_sync_reset_reason = ""
         self._av_sync_reset_target_speech_id = None
-        self._av_sync_reset_wait_for_audio = True
 
         cleared = None
         if self.client_session_delegate is not None:
@@ -289,30 +266,65 @@ class RtcStream(AsyncAudioVideoStreamHandler):
                         f"AV_SYNC_RTC_RESET clear_data failed session={self.session_id} reason={reason}"
                     )
 
-        self._av_sync_audio_samples_total = 0
-        self._av_sync_video_frames_total = 0
+        cleared_rtp_audio_queue = False
+        clear_rtp_audio_queue = getattr(self, "clear_queue", None)
+        if callable(clear_rtp_audio_queue):
+            try:
+                clear_rtp_audio_queue()
+                cleared_rtp_audio_queue = True
+            except Exception as e:
+                logger.opt(exception=e).warning(
+                    f"AV_SYNC_RTC_RESET clear RTP audio queue failed "
+                    f"session={self.session_id} reason={reason}"
+                )
+
+        self._av_rtp_audio_ms = None
+        self._av_rtp_video_ms = None
         self._av_sync_current_speech_id = target_speech_id
-        self._av_sync_wait_for_first_audio = bool(wait_for_audio)
         logger.info(
             f"AV_SYNC_RTC_RESET session={self.session_id} reason={reason} "
-            f"cleared={cleared} target_speech_id={target_speech_id} "
-            f"wait_for_audio={self._av_sync_wait_for_first_audio}"
+            f"business_queues={cleared} rtp_audio_queue={cleared_rtp_audio_queue} "
+            f"target_speech_id={target_speech_id}"
         )
 
-    async def _wait_for_audio_catchup(self, prospective_video_ms: float) -> tuple[float, float, float]:
+    def note_audio_rtp_egress(self, media_ms: float, *, codec: str) -> None:
+        if self.quit.is_set():
+            return
+        if self._av_rtp_audio_ms is None or media_ms >= self._av_rtp_audio_ms:
+            self._av_rtp_audio_ms = media_ms
+        self._av_diag_audio_rtp_seq += 1
+        if _AV_SYNC_DIAG and self._av_diag_audio_rtp_seq % _AV_SYNC_DIAG_EVERY == 0:
+            logger.info(
+                f"AV_SYNC_RTP_AUDIO_EGRESS session={self.session_id} "
+                f"mono={time.monotonic():.6f} seq={self._av_diag_audio_rtp_seq} "
+                f"media_ms={media_ms:.1f} codec={codec}"
+            )
+
+    async def wait_for_video_rtp_egress(self, media_ms: float, *, codec: str) -> None:
         wait_start = time.perf_counter()
-        audio_ms = self._av_sync_audio_ms()
-        drift_ms = prospective_video_ms - audio_ms
+        audio_ms = self._av_rtp_audio_ms
         while (
-            drift_ms > self._av_sync_video_lead_limit_ms
-            and not self.quit.is_set()
-            and not self._av_sync_reset_requested
+            not self.quit.is_set()
+            and (
+                audio_ms is None
+                or media_ms - audio_ms > self._av_rtp_video_lead_limit_ms
+            )
         ):
-            await asyncio.sleep(_AV_SYNC_WAIT_INTERVAL_S)
-            audio_ms = self._av_sync_audio_ms()
-            drift_ms = prospective_video_ms - audio_ms
-        sync_wait_ms = (time.perf_counter() - wait_start) * 1000
-        return audio_ms, drift_ms, sync_wait_ms
+            await asyncio.sleep(_AV_SYNC_RTP_WAIT_INTERVAL_S)
+            audio_ms = self._av_rtp_audio_ms
+
+        self._av_rtp_video_ms = media_ms
+        self._av_diag_video_rtp_seq += 1
+        wait_ms = (time.perf_counter() - wait_start) * 1000.0
+        drift_ms = media_ms - audio_ms if audio_ms is not None else float("inf")
+        if _AV_SYNC_DIAG and self._av_diag_video_rtp_seq % _AV_SYNC_DIAG_EVERY == 0:
+            logger.info(
+                f"AV_SYNC_RTP_VIDEO_EGRESS session={self.session_id} "
+                f"mono={time.monotonic():.6f} seq={self._av_diag_video_rtp_seq} "
+                f"media_ms={media_ms:.1f} audio_media_ms={audio_ms} "
+                f"drift_ms={drift_ms:.1f} wait_ms={wait_ms:.1f} "
+                f"limit_ms={self._av_rtp_video_lead_limit_ms:.1f} codec={codec}"
+            )
 
 
     # copy is used as create_instance in fastrtc
@@ -375,7 +387,7 @@ class RtcStream(AsyncAudioVideoStreamHandler):
                 f"fps={self.fps} input_sr={self.input_sample_rate} "
                 f"output_sr={self.output_sample_rate} output_frame_size={self.output_frame_size} "
                 f"stream_start_delay={self.stream_start_delay} "
-                f"video_lead_limit_ms={self._av_sync_video_lead_limit_ms:.1f}"
+                f"rtp_video_lead_limit_ms={self._av_rtp_video_lead_limit_ms:.1f}"
             )
         existing_delegate = factory.client_handler_delegate.find_session_delegate(session_id)
         if existing_delegate is not None:
@@ -446,14 +458,6 @@ class RtcStream(AsyncAudioVideoStreamHandler):
                 self.emit_counter.add_property("audio_emit", sample_num / self.output_sample_rate)
                 self._av_diag_audio_emit_seq += 1
                 self._av_diag_audio_samples_total += sample_num
-                self._av_sync_audio_samples_total += sample_num
-                if self._av_sync_wait_for_first_audio:
-                    self._av_sync_wait_for_first_audio = False
-                    logger.info(
-                        f"AV_SYNC_RTC_AUDIO_RESUME session={self.session_id} "
-                        f"speech_id={speech_id} target_speech_id={self._av_sync_current_speech_id} "
-                        f"samples={sample_num} wait_ms={get_data_wait_ms:.1f}"
-                    )
                 if _AV_SYNC_DIAG and self._av_diag_audio_emit_seq % _AV_SYNC_DIAG_EVERY == 0:
                     logger.info(
                         f"AV_SYNC_RTC_AUDIO_EMIT session={self.session_id} "
@@ -484,9 +488,6 @@ class RtcStream(AsyncAudioVideoStreamHandler):
             
             while not self.quit.is_set():
                 self._apply_pending_av_sync_reset()
-                if self._av_sync_wait_for_first_audio:
-                    await asyncio.sleep(_AV_SYNC_WAIT_INTERVAL_S)
-                    continue
 
                 get_data_start = time.perf_counter()
                 video_frame_data: ChatData = await self.client_session_delegate.get_data(EngineChannelType.VIDEO)
@@ -519,34 +520,12 @@ class RtcStream(AsyncAudioVideoStreamHandler):
                     continue
                 frame_data = frame_data_array.squeeze()
 
-                prospective_video_frames = self._av_sync_video_frames_total + 1
-                prospective_video_ms = self._av_sync_video_ms(prospective_video_frames)
-                audio_ms, drift_ms, sync_wait_ms = await self._wait_for_audio_catchup(prospective_video_ms)
-                if self.quit.is_set():
-                    return None
-                if self._av_sync_reset_requested:
-                    self._apply_pending_av_sync_reset()
-                    continue
-
-                self._av_sync_video_frames_total = prospective_video_frames
                 self._av_diag_video_emit_seq += 1
-                video_ms = self._av_sync_video_ms()
-                drift_ms = video_ms - audio_ms
-                if drift_ms > _AV_SYNC_VIDEO_WARN_LIMIT_MS:
-                    logger.warning(
-                        f"AV_SYNC_RTC_VIDEO_LEAD_EXCEEDED session={self.session_id} "
-                        f"video_ms={video_ms:.1f} audio_ms={audio_ms:.1f} "
-                        f"drift_ms={drift_ms:.1f} limit_ms={self._av_sync_video_lead_limit_ms:.1f} "
-                        f"warn_limit_ms={_AV_SYNC_VIDEO_WARN_LIMIT_MS:.1f} "
-                        f"sync_wait_ms={sync_wait_ms:.1f}"
-                    )
                 if _AV_SYNC_DIAG and self._av_diag_video_emit_seq % _AV_SYNC_DIAG_EVERY == 0:
                     shape = getattr(frame_data, "shape", None)
                     logger.info(
                         f"AV_SYNC_RTC_VIDEO_EMIT session={self.session_id} "
                         f"mono={time.monotonic():.6f} seq={self._av_diag_video_emit_seq} "
-                        f"total_video_ms={video_ms:.1f} audio_total_ms={audio_ms:.1f} "
-                        f"av_drift_ms={drift_ms:.1f} sync_wait_ms={sync_wait_ms:.1f} "
                         f"wait_ms={get_data_wait_time * 1000:.1f} "
                         f"chat_ts={video_frame_data.timestamp[0]}/{video_frame_data.timestamp[1]} "
                         f"is_first={video_frame_data.is_first_data} is_last={video_frame_data.is_last_data} "

@@ -261,8 +261,48 @@ def _configure_h264_hardware_encoding():
     logger.info("H.264 encoder configuration completed")
 
 
+def _configure_rtp_egress_av_sync():
+    """Synchronize outgoing video against audio immediately before RTP send."""
+    from aiortc import RTCRtpSender
+
+    if getattr(RTCRtpSender, "_openavatarchat_av_sync_patched", False):
+        return
+
+    original_next_encoded_frame = RTCRtpSender._next_encoded_frame
+
+    async def patched_next_encoded_frame(self, codec):
+        encoded_frame = await original_next_encoded_frame(self, codec)
+        if encoded_frame is None:
+            return None
+
+        track = getattr(self, "_RTCRtpSender__track", None)
+        event_handler = getattr(track, "event_handler", None)
+        clock_rate = getattr(codec, "clockRate", None)
+        timestamp = getattr(encoded_frame, "timestamp", None)
+        if event_handler is None or not clock_rate or timestamp is None:
+            return encoded_frame
+
+        media_ms = float(timestamp) / float(clock_rate) * 1000.0
+        track_kind = getattr(track, "kind", None)
+        if track_kind == "audio":
+            note_audio = getattr(event_handler, "note_audio_rtp_egress", None)
+            if callable(note_audio):
+                note_audio(media_ms, codec=getattr(codec, "mimeType", "audio"))
+        elif track_kind == "video":
+            wait_for_audio = getattr(event_handler, "wait_for_video_rtp_egress", None)
+            if callable(wait_for_audio):
+                await wait_for_audio(media_ms, codec=getattr(codec, "mimeType", "video"))
+
+        return encoded_frame
+
+    RTCRtpSender._next_encoded_frame = patched_next_encoded_frame
+    RTCRtpSender._openavatarchat_av_sync_patched = True
+    logger.info("RTP egress A/V synchronization configured")
+
+
 _prioritize_h264()
 _configure_h264_hardware_encoding()
+_configure_rtp_egress_av_sync()
 
 # Import fastrtc after H.264 configuration
 # noinspection PyPackageRequirements
@@ -837,7 +877,6 @@ class ClientHandlerRtc(ClientHandlerBase):
             reset(
                 reason=f"interrupt:{source_name}",
                 target_speech_id=None,
-                wait_for_audio=False,
             )
 
     def _handle_client_playback_av_sync_signal(self, context: ClientRtcContext, signal: ChatSignal) -> None:
@@ -869,7 +908,6 @@ class ClientHandlerRtc(ClientHandlerBase):
                 reset(
                     reason=f"{reason}:stream_begin",
                     target_speech_id=target_speech_id,
-                    wait_for_audio=True,
                 )
             return
 
@@ -879,7 +917,6 @@ class ClientHandlerRtc(ClientHandlerBase):
                 reset(
                     reason=f"{reason}:stream_cancel",
                     target_speech_id=None,
-                    wait_for_audio=False,
                 )
             return
 
