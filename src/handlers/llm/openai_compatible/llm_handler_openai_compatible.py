@@ -24,9 +24,17 @@ from .chat_history_manager import ChatHistory, HistoryMessage
 from .emotional_support_adapter import EmotionalSupportSkillAdapter
 from .scopemem_adapter import OpenAvatarScopeMemory
 from .search_engine import format_search_results, search_bocha
+from .reminder_response_guard import emit_missing_reminder_tool_reply
 from chat_engine.data_models.chat_stream_config import ChatStreamConfig
 from engine_utils.conversation_audit_logger import audit_event
 from handlers.agent.prompt.elder_profile_prompt import build_elder_profile_prompt
+from handlers.agent.tools.reminder.intent_policy import (
+    forced_reminder_tool_choice,
+    is_forced_reminder_choice,
+)
+from handlers.agent.tools.reminder.prompt_rules import (
+    REMINDER_SYSTEM_RULES,
+)
 from handlers.agent.tools.reminder.fulfillment import (
     fulfill_reminder_action,
     is_pending_reminder_result,
@@ -95,7 +103,7 @@ def _summarize_url_for_log(url: str) -> str:
     return f"{parts.scheme}://{host}{path}"
 
 
-XIAOBAN_SYSTEM_PROMPT = r"""
+XIAOBAN_SYSTEM_PROMPT = rf"""
 你是陪伴音箱“灵心小伴”中的 AI 助手，名字叫小伴，服务于六十岁以上的老人，主要提供情感陪伴、日常问候、生活提醒、通用健康关怀和紧急求助协助。
 
 【处理原则】
@@ -164,14 +172,7 @@ XIAOBAN_SYSTEM_PROMPT = r"""
 
 【提醒与重要信息】
 
-涉及提醒时间、用药时间、约会、人员或地点等重要信息时，应简短复述确认。
-
-用户要求创建提醒，且事项和时间明确时，调用对应工具。工具返回成功前，只能说正在记录或保存，不能声称提醒已经创建成功。工具失败或结果不明确时，要如实说明。
-用户要求取消提醒时，必须先从当前提醒快照确定唯一 entity_id；无法唯一定位时先追问，不得猜测。
-取消是破坏性操作。首次提出取消时只复述具体提醒并询问是否确认，不执行取消。
-只有用户在后续一轮明确确认后，才能调用取消工具并传 confirmed=true。
-普通提醒工具不得修改正式用药方案，也不得关闭危急预警、ALERT、SOS 或医疗安全工单。
-取消同样必须等待真实成功回执，成功回执前不得声称已经取消。
+{REMINDER_SYSTEM_RULES}
 
 【紧急求助】
 
@@ -618,6 +619,8 @@ class HandlerLLM(HandlerBase, ABC):
                 if support_context:
                     messages.append(support_context)
             create_kwargs = self._build_completion_kwargs(context, messages, chat_text)
+            tool_choice = create_kwargs.get("tool_choice")
+            forced_reminder_turn = is_forced_reminder_choice(tool_choice)
 
             audit_event(
                 context,
@@ -630,7 +633,7 @@ class HandlerLLM(HandlerBase, ABC):
                 messages=messages,
                 user_text=chat_text,
                 has_tools=bool(create_kwargs.get("tools")),
-                tool_choice=create_kwargs.get("tool_choice"),
+                tool_choice=tool_choice,
                 tool_schema_names=self._tool_schema_names(create_kwargs.get("tools") or []),
             )
             context.current_image = None
@@ -644,9 +647,23 @@ class HandlerLLM(HandlerBase, ABC):
                 output_definition,
                 streamer,
                 stream_key,
+                emit_text=not forced_reminder_turn,
             )
             tool_trace["llm_need_tool"] = bool(tool_calls)
             tool_trace["tool_calls"] = self._clean_trace_tool_calls(tool_calls)
+            emit_missing_reminder_tool_reply(
+                context=context,
+                tool_choice=tool_choice,
+                has_tool_calls=bool(tool_calls),
+                cancelled=cancelled,
+                model_output=full_text,
+                user_text=chat_text,
+                output_definition=output_definition,
+                streamer=streamer,
+                stream_identity=inputs.stream_id,
+                stream_key=stream_key,
+                turn_id=turn_id,
+            )
             if (
                 not cancelled
                 and not tool_calls
@@ -671,7 +688,7 @@ class HandlerLLM(HandlerBase, ABC):
             if not cancelled and tool_calls:
                 self._handle_tool_calls(
                     context,
-                    full_text,
+                    "" if forced_reminder_turn else full_text,
                     tool_calls,
                     output_definition,
                     streamer,
@@ -881,6 +898,16 @@ class HandlerLLM(HandlerBase, ABC):
     @staticmethod
     def _tool_choice_for_turn(context: LLMContext, user_text: str = ""):
         configured_choice = getattr(context, "tool_choice", None)
+        reminder_choice = forced_reminder_tool_choice(
+            user_text,
+            available_tools=HandlerLLM._tool_schema_names(
+                getattr(context, "tool_schemas", []) or []
+            ),
+            configured_choice=configured_choice,
+        )
+        if reminder_choice:
+            logger.info(f"LLM forcing manage_reminder tool_choice for user_text={user_text[:120]!r}")
+            return reminder_choice
         if (
             configured_choice != "none"
             and HandlerLLM._should_force_music_control_tool(context, user_text)
@@ -1040,6 +1067,7 @@ class HandlerLLM(HandlerBase, ABC):
         output_definition,
         streamer,
         stream_key: Optional[str],
+        emit_text: bool = True,
     ) -> Tuple[str, List[dict], bool]:
         full_text = ""
         tool_calls_accum: Dict[int, dict] = {}
@@ -1064,11 +1092,12 @@ class HandlerLLM(HandlerBase, ABC):
             output_text = getattr(delta, "content", None)
             if output_text:
                 full_text += output_text
-                context.output_texts += output_text
                 logger.info(output_text)
-                output = DataBundle(output_definition)
-                output.set_main_data(output_text)
-                streamer.stream_data(output)
+                if emit_text:
+                    context.output_texts += output_text
+                    output = DataBundle(output_definition)
+                    output.set_main_data(output_text)
+                    streamer.stream_data(output)
 
             delta_tool_calls = getattr(delta, "tool_calls", None)
             if delta_tool_calls:

@@ -13,6 +13,7 @@ from handlers.agent.tools.reminder.action_builder import (
     build_create_action,
 )
 from handlers.agent.tools.reminder.pending_actions import get_pending_action_registry
+from handlers.agent.tools.reminder.prompt_rules import REMINDER_TOOL_DESCRIPTION
 from handlers.agent.tools.reminder.schemas import (
     ReminderOperation,
     ReminderValidationError,
@@ -54,25 +55,7 @@ class ManageReminderTool(BaseTool):
 
     @property
     def description(self) -> str:
-        return (
-            "创建或取消普通关怀提醒。仅当用户明确要求"
-            "创建提醒，且事项和具体时间都清楚时，"
-            "才调用 operation=create；时间含糊或缺失时"
-            "必须先追问，不得猜时间。remind_at 可传"
-            "结合系统当前时间算出的 ISO 时间、epoch 毫秒，"
-            "或用户明确说出的完整时间表达。"
-            "operation=cancel 时，必须先从当前提醒快照"
-            "确定唯一 entity_id，并先用自然语言复述具体提醒，"
-            "取得明确确认；只有确认后的下一轮调用才传"
-            " confirmed=true。不得按标题模糊取消，不得猜 entity_id。"
-            "该工具只操作 kind=custom 的普通关怀/一次性提醒；"
-            "不得创建、修改或删除正式用药方案（剂量、次数、周期），"
-            "应引导家属去小程序维护。不得用它关闭危急体征预警、"
-            "ALERT/SOS 或医疗安全工单；危急语境中的"
-            "‘别提醒了’不能调用本工具。"
-            "工具返回真实 action_ack 后的结构化结果；"
-            "在 ok=true 前不得告诉用户已经成功。"
-        )
+        return REMINDER_TOOL_DESCRIPTION
 
     @property
     def parameters(self) -> dict:

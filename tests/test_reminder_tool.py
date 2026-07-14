@@ -223,6 +223,20 @@ def test_time_normalization_covers_calendar_relative_repeat_and_cross_day():
     )
 
 
+@pytest.mark.parametrize(
+    "value",
+    ["2026-07-13 22:00:00", "2026-07-13T22:00:00"],
+)
+def test_time_normalization_accepts_common_llm_datetime_formats(value):
+    now = datetime(2026, 7, 13, 20, 0, tzinfo=SHANGHAI)
+
+    remind_at = normalize_remind_at(value, timezone_name="Asia/Shanghai", now=now)
+
+    assert datetime.fromtimestamp(remind_at / 1000, SHANGHAI) == datetime(
+        2026, 7, 13, 22, 0, tzinfo=SHANGHAI
+    )
+
+
 def test_time_normalization_uses_device_timezone_and_rejects_past_or_ambiguous_time():
     same_instant = datetime(2026, 7, 13, 22, 0, tzinfo=timezone.utc)
     shanghai = normalize_remind_at(

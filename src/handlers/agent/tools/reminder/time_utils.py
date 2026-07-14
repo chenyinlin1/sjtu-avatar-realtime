@@ -74,17 +74,19 @@ def normalize_remind_at(
     if not isinstance(value, str):
         raise ReminderTimeError("remind_at must be a timestamp or time expression")
 
-    text = re.sub(r"\s+", "", value.strip())
+    text = value.strip()
     if not text:
         raise AmbiguousReminderTimeError("remind_at is empty")
-    if re.fullmatch(r"\d+(?:\.\d+)?", text):
-        return _ensure_future(_normalize_epoch(float(text)), local_now)
+    compact_text = re.sub(r"\s+", "", text)
+    if re.fullmatch(r"\d+(?:\.\d+)?", compact_text):
+        return _ensure_future(_normalize_epoch(float(compact_text)), local_now)
 
-    iso_datetime = _parse_iso_datetime(text, timezone)
+    iso_text = re.sub(r"\s+", " ", text)
+    iso_datetime = _parse_iso_datetime(iso_text, timezone)
     if iso_datetime is not None:
         return _ensure_future(int(iso_datetime.timestamp() * 1000), local_now)
 
-    parsed = _parse_natural_datetime(text, local_now, repeat=repeat)
+    parsed = _parse_natural_datetime(compact_text, local_now, repeat=repeat)
     return _ensure_future(int(parsed.timestamp() * 1000), local_now)
 
 
