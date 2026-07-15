@@ -2,10 +2,14 @@ import asyncio
 
 import pytest
 
+from chat_engine.data_models.engine_channel_type import EngineChannelType
 from service.rtc_service.rtc_stream import RtcStream
 
 
 class DummyDelegate:
+    def __init__(self):
+        self.output_queues = {EngineChannelType.VIDEO: asyncio.Queue()}
+
     def clear_data(self):
         return {"audio": 0, "video": 0, "text": 0}
 
@@ -100,3 +104,37 @@ def test_existing_video_lead_limit_still_waits_for_audio():
         return await asyncio.wait_for(task, timeout=0.1)
 
     assert asyncio.run(exercise_wait()) == pytest.approx(1080.0)
+
+
+def test_sustained_audio_lead_drops_stale_video_and_rebases_next_frame():
+    stream = make_stream()
+    video_queue = stream.client_session_delegate.output_queues[EngineChannelType.VIDEO]
+    for frame_index in range(91):
+        video_queue.put_nowait(frame_index)
+
+    for step in range(3):
+        stream.note_audio_rtp_egress(
+            10000.0 + step * 40.0,
+            codec="audio/opus",
+        )
+        asyncio.run(
+            stream.wait_for_video_rtp_egress(
+                8200.0 + step * 40.0,
+                codec="video/H264",
+            )
+        )
+
+    plan = stream._av_video_catchup_plan
+    assert plan is not None
+    assert plan.requested_drop_frames == 43
+
+    stream._apply_pending_video_catchup()
+    assert video_queue.qsize() == 48
+    assert stream._av_rtp_video_rebase_pending is True
+
+    stream.note_audio_rtp_egress(10120.0, codec="audio/opus")
+    aligned_ms = asyncio.run(
+        stream.wait_for_video_rtp_egress(8320.0, codec="video/H264")
+    )
+    assert aligned_ms == pytest.approx(10120.0)
+    assert stream._av_rtp_video_offset_ms == pytest.approx(1800.0)

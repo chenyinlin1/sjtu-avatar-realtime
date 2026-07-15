@@ -35,6 +35,7 @@ from handlers.client.ws_client.ws_message_protocol import (
 from service.v1_adapter.personas.runtime import PersonaRuntimeError, PersonaRuntimeResolver
 from engine_utils.conversation_audit_logger import audit_event
 from service.rtc_service.session_event_policy import SessionEventPolicy
+from service.rtc_service.av_sync import VideoCatchupController, VideoCatchupPlan
 from handlers.agent.tools.reminder.pending_actions import get_pending_action_registry
 
 
@@ -115,6 +116,8 @@ class RtcStream(AsyncAudioVideoStreamHandler):
         self._av_rtp_video_offset_ms = 0.0
         self._av_rtp_video_rebase_pending = False
         self._av_rtp_video_rebase_reason = ""
+        self._av_video_catchup_controller = VideoCatchupController(fps=self.fps)
+        self._av_video_catchup_plan: Optional[VideoCatchupPlan] = None
         self._av_sync_reset_requested = False
         self._av_sync_reset_reason = ""
         self._av_sync_reset_target_speech_id: Optional[str] = None
@@ -249,6 +252,66 @@ class RtcStream(AsyncAudioVideoStreamHandler):
             and speech_id != self._av_sync_current_speech_id
         )
 
+    def _get_video_output_queue(self) -> Optional[asyncio.Queue]:
+        delegate = self.client_session_delegate
+        if delegate is None:
+            return None
+        output_queues = getattr(delegate, "output_queues", None)
+        if not isinstance(output_queues, dict):
+            return None
+        return output_queues.get(EngineChannelType.VIDEO)
+
+    def _schedule_video_catchup(self, drift_ms: float) -> None:
+        if (
+            self._av_video_catchup_plan is not None
+            or self._av_sync_reset_requested
+            or self._av_rtp_video_rebase_pending
+        ):
+            return
+
+        video_queue = self._get_video_output_queue()
+        queue_size = video_queue.qsize() if video_queue is not None else 0
+        plan = self._av_video_catchup_controller.observe(
+            drift_ms,
+            queue_size=queue_size,
+            now_s=time.monotonic(),
+        )
+        if plan is None:
+            return
+
+        self._av_video_catchup_plan = plan
+        logger.info(
+            f"AV_SYNC_RTP_VIDEO_CATCHUP_SCHEDULE session={self.session_id} "
+            f"audio_lead_ms={plan.observed_lag_ms:.1f} queue_size={plan.queue_size} "
+            f"requested_drop_frames={plan.requested_drop_frames}"
+        )
+
+    def _apply_pending_video_catchup(self) -> None:
+        plan = self._av_video_catchup_plan
+        if plan is None:
+            return
+        self._av_video_catchup_plan = None
+
+        video_queue = self._get_video_output_queue()
+        dropped_frames = 0
+        if video_queue is not None:
+            while dropped_frames < plan.requested_drop_frames:
+                try:
+                    video_queue.get_nowait()
+                    dropped_frames += 1
+                except asyncio.QueueEmpty:
+                    break
+
+        self._av_rtp_video_rebase_pending = True
+        self._av_rtp_video_rebase_reason = "continuous_audio_lead_catchup"
+        remaining_queue_size = video_queue.qsize() if video_queue is not None else 0
+        logger.info(
+            f"AV_SYNC_RTC_VIDEO_CATCHUP_APPLY session={self.session_id} "
+            f"audio_lead_ms={plan.observed_lag_ms:.1f} "
+            f"requested_drop_frames={plan.requested_drop_frames} "
+            f"dropped_frames={dropped_frames} remaining_queue_size={remaining_queue_size}"
+        )
+
     def _apply_pending_av_sync_reset(self) -> None:
         if not self._av_sync_reset_requested:
             return
@@ -286,6 +349,8 @@ class RtcStream(AsyncAudioVideoStreamHandler):
         self._av_rtp_video_ms = None
         self._av_rtp_video_rebase_pending = True
         self._av_rtp_video_rebase_reason = reason
+        self._av_video_catchup_plan = None
+        self._av_video_catchup_controller.reset()
         self._av_sync_current_speech_id = target_speech_id
         logger.info(
             f"AV_SYNC_RTC_RESET session={self.session_id} reason={reason} "
@@ -351,6 +416,7 @@ class RtcStream(AsyncAudioVideoStreamHandler):
         self._av_diag_video_rtp_seq += 1
         wait_ms = (time.perf_counter() - wait_start) * 1000.0
         drift_ms = media_ms - audio_ms if audio_ms is not None else float("inf")
+        self._schedule_video_catchup(drift_ms)
         if _AV_SYNC_DIAG and self._av_diag_video_rtp_seq % _AV_SYNC_DIAG_EVERY == 0:
             logger.info(
                 f"AV_SYNC_RTP_VIDEO_EGRESS session={self.session_id} "
@@ -520,10 +586,12 @@ class RtcStream(AsyncAudioVideoStreamHandler):
                 return None
             
             self._apply_pending_av_sync_reset()
+            self._apply_pending_video_catchup()
             self.emit_counter.add_property("video_emit")
             
             while not self.quit.is_set():
                 self._apply_pending_av_sync_reset()
+                self._apply_pending_video_catchup()
 
                 get_data_start = time.perf_counter()
                 video_frame_data: ChatData = await self.client_session_delegate.get_data(EngineChannelType.VIDEO)
