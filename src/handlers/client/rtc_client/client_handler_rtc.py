@@ -291,7 +291,12 @@ def _configure_rtp_egress_av_sync():
         elif track_kind == "video":
             wait_for_audio = getattr(event_handler, "wait_for_video_rtp_egress", None)
             if callable(wait_for_audio):
-                await wait_for_audio(media_ms, codec=getattr(codec, "mimeType", "video"))
+                aligned_media_ms = await wait_for_audio(
+                    media_ms, codec=getattr(codec, "mimeType", "video")
+                )
+                encoded_frame.timestamp = int(
+                    round(float(aligned_media_ms) / 1000.0 * float(clock_rate))
+                )
 
         return encoded_frame
 

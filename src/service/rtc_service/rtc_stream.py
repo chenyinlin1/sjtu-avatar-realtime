@@ -1,5 +1,6 @@
 import asyncio
 import json
+import math
 import os
 import time
 import uuid
@@ -111,6 +112,9 @@ class RtcStream(AsyncAudioVideoStreamHandler):
         self._av_rtp_audio_ms: Optional[float] = None
         self._av_rtp_video_ms: Optional[float] = None
         self._av_rtp_video_lead_limit_ms = _AV_SYNC_RTP_VIDEO_LEAD_LIMIT_MS
+        self._av_rtp_video_offset_ms = 0.0
+        self._av_rtp_video_rebase_pending = False
+        self._av_rtp_video_rebase_reason = ""
         self._av_sync_reset_requested = False
         self._av_sync_reset_reason = ""
         self._av_sync_reset_target_speech_id: Optional[str] = None
@@ -280,6 +284,8 @@ class RtcStream(AsyncAudioVideoStreamHandler):
 
         self._av_rtp_audio_ms = None
         self._av_rtp_video_ms = None
+        self._av_rtp_video_rebase_pending = True
+        self._av_rtp_video_rebase_reason = reason
         self._av_sync_current_speech_id = target_speech_id
         logger.info(
             f"AV_SYNC_RTC_RESET session={self.session_id} reason={reason} "
@@ -300,15 +306,43 @@ class RtcStream(AsyncAudioVideoStreamHandler):
                 f"media_ms={media_ms:.1f} codec={codec}"
             )
 
-    async def wait_for_video_rtp_egress(self, media_ms: float, *, codec: str) -> None:
+    async def wait_for_video_rtp_egress(self, media_ms: float, *, codec: str) -> float:
+        raw_media_ms = media_ms
+        media_ms += self._av_rtp_video_offset_ms
         wait_start = time.perf_counter()
         audio_ms = self._av_rtp_audio_ms
+
+        while not self.quit.is_set() and audio_ms is None:
+            await asyncio.sleep(_AV_SYNC_RTP_WAIT_INTERVAL_S)
+            audio_ms = self._av_rtp_audio_ms
+
+        if self._av_rtp_video_rebase_pending and audio_ms is not None:
+            drift_before_rebase_ms = media_ms - audio_ms
+            frame_interval_ms = 1000.0 / self.fps if self.fps > 0 else 40.0
+            rebase_threshold_ms = max(80.0, frame_interval_ms * 2)
+            if drift_before_rebase_ms < -rebase_threshold_ms:
+                correction_ms = (
+                    math.ceil(-drift_before_rebase_ms / frame_interval_ms)
+                    * frame_interval_ms
+                )
+                old_offset_ms = self._av_rtp_video_offset_ms
+                self._av_rtp_video_offset_ms += correction_ms
+                media_ms += correction_ms
+                logger.info(
+                    f"AV_SYNC_RTP_VIDEO_REBASE session={self.session_id} "
+                    f"reason={self._av_rtp_video_rebase_reason or 'unspecified'} "
+                    f"raw_video_ms={raw_media_ms:.1f} audio_media_ms={audio_ms:.1f} "
+                    f"drift_before_ms={drift_before_rebase_ms:.1f} "
+                    f"old_offset_ms={old_offset_ms:.1f} correction_ms={correction_ms:.1f} "
+                    f"new_offset_ms={self._av_rtp_video_offset_ms:.1f}"
+                )
+            self._av_rtp_video_rebase_pending = False
+            self._av_rtp_video_rebase_reason = ""
+
         while (
             not self.quit.is_set()
-            and (
-                audio_ms is None
-                or media_ms - audio_ms > self._av_rtp_video_lead_limit_ms
-            )
+            and audio_ms is not None
+            and media_ms - audio_ms > self._av_rtp_video_lead_limit_ms
         ):
             await asyncio.sleep(_AV_SYNC_RTP_WAIT_INTERVAL_S)
             audio_ms = self._av_rtp_audio_ms
@@ -321,10 +355,12 @@ class RtcStream(AsyncAudioVideoStreamHandler):
             logger.info(
                 f"AV_SYNC_RTP_VIDEO_EGRESS session={self.session_id} "
                 f"mono={time.monotonic():.6f} seq={self._av_diag_video_rtp_seq} "
-                f"media_ms={media_ms:.1f} audio_media_ms={audio_ms} "
+                f"media_ms={media_ms:.1f} raw_media_ms={raw_media_ms:.1f} "
+                f"offset_ms={self._av_rtp_video_offset_ms:.1f} audio_media_ms={audio_ms} "
                 f"drift_ms={drift_ms:.1f} wait_ms={wait_ms:.1f} "
                 f"limit_ms={self._av_rtp_video_lead_limit_ms:.1f} codec={codec}"
             )
+        return media_ms
 
 
     # copy is used as create_instance in fastrtc
