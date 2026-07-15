@@ -1510,19 +1510,27 @@ class HandlerLLM(HandlerBase, ABC):
                     elif action == "replay":
                         HandlerLLM._mark_shared_music_status(context, "loading", "server_control_replay")
 
+                client_action = HandlerLLM._build_music_control_client_action(
+                    context,
+                    action,
+                    delta=data.get("delta"),
+                    hints=data.get("hints"),
+                )
                 output = DataBundle(output_definition)
                 output.set_main_data("")
-                output.add_meta("client_action", {
-                    "type": "music.control",
-                    "action": action,
-                    "delta": data.get("delta"),
-                    "hints": data.get("hints") or ["停止", "暂停", "继续", "重播", "下一首", "音量小一点"],
-                })
+                output.add_meta("client_action", client_action)
                 streamer.stream_data(output)
-                logger.info(
-                    f"Music client_action dispatch: type=music.control stream_key={stream_key} "
-                    f"action={action} delta={data.get('delta')} active={context.music_player_active} via=tool_call"
-                )
+                if client_action.get("type") == "music.play":
+                    logger.info(
+                        f"Music replay compatibility dispatch: type=music.play stream_key={stream_key} "
+                        f"title={client_action.get('title')!r} artist={client_action.get('artist')!r} "
+                        f"url={_summarize_url_for_log(client_action.get('url') or '')} via=tool_call"
+                    )
+                else:
+                    logger.info(
+                        f"Music client_action dispatch: type=music.control stream_key={stream_key} "
+                        f"action={action} delta={data.get('delta')} active={context.music_player_active} via=tool_call"
+                    )
                 if action == "stop":
                     context.emit_signal(
                         ChatSignal(
@@ -1553,6 +1561,15 @@ class HandlerLLM(HandlerBase, ABC):
                 source = data.get("source") or ""
                 candidates = data.get("candidates") or []
 
+                HandlerLLM._remember_music_track(
+                    context,
+                    title=song_title,
+                    artist=artist,
+                    url=play_url,
+                    source=source,
+                    query=data.get("query") or "",
+                    candidates=candidates,
+                )
                 HandlerLLM._set_music_player_active(context, True)
                 HandlerLLM._mark_shared_music_status(context, "loading", "server_play_dispatched")
                 output = DataBundle(output_definition)
@@ -2083,6 +2100,86 @@ class HandlerLLM(HandlerBase, ABC):
         return status if isinstance(status, dict) else {}
 
     @staticmethod
+    def _remember_music_track(
+        context,
+        *,
+        title: str = "",
+        artist: str = "",
+        url: str = "",
+        source: str = "",
+        query: str = "",
+        candidates=None,
+    ) -> None:
+        normalized_url = str(url or "").strip()
+        if not normalized_url:
+            return
+        shared_states = getattr(context, "shared_states", None)
+        if shared_states is None:
+            return
+        shared_states.last_music_track = {
+            "title": str(title or ""),
+            "artist": str(artist or ""),
+            "url": normalized_url,
+            "source": str(source or ""),
+            "query": str(query or ""),
+            "candidates": list(candidates or []),
+        }
+
+    @staticmethod
+    def _get_last_music_track(context) -> dict:
+        shared_states = getattr(context, "shared_states", None)
+        cached = getattr(shared_states, "last_music_track", None) if shared_states is not None else None
+        if isinstance(cached, dict) and str(cached.get("url") or "").strip():
+            return cached
+        status = HandlerLLM._get_shared_music_status(context)
+        if str(status.get("url") or "").strip():
+            return {
+                "title": status.get("title") or "",
+                "artist": status.get("artist") or "",
+                "url": status.get("url") or "",
+                "source": "",
+                "query": "",
+                "candidates": [],
+            }
+        return {}
+
+    @staticmethod
+    def _build_music_control_client_action(
+        context,
+        action: str,
+        *,
+        delta=None,
+        hints=None,
+    ) -> dict:
+        normalized_hints = hints or [
+            "停止",
+            "暂停",
+            "继续",
+            "重播",
+            "下一首",
+            "音量小一点",
+        ]
+        if action == "replay":
+            track = HandlerLLM._get_last_music_track(context)
+            if track:
+                return {
+                    "type": "music.play",
+                    "title": track.get("title") or "",
+                    "artist": track.get("artist") or "",
+                    "url": track.get("url") or "",
+                    "source": track.get("source") or "replay_cache",
+                    "query": track.get("query") or track.get("title") or "",
+                    "candidates": track.get("candidates") or [],
+                    "hints": normalized_hints,
+                }
+        return {
+            "type": "music.control",
+            "action": action,
+            "delta": delta,
+            "hints": normalized_hints,
+        }
+
+    @staticmethod
     def _get_shared_music_state(context) -> str:
         state = HandlerLLM._get_shared_music_status(context).get("state")
         return str(state or "").strip().lower()
@@ -2130,7 +2227,7 @@ class HandlerLLM(HandlerBase, ABC):
         if action == "pause":
             return active or state in MUSIC_DIRECT_PAUSE_STATES
         if action == "replay":
-            return active or state == "ended"
+            return active or state == "ended" or bool(HandlerLLM._get_last_music_track(context))
         if action in {"resume", "next", "volume", "mute", "unmute"}:
             return active
         return False
@@ -2359,6 +2456,15 @@ class HandlerLLM(HandlerBase, ABC):
         if stream_key:
             context.active_stream_keys.add(stream_key)
         if play_url:
+            HandlerLLM._remember_music_track(
+                context,
+                title=song_title,
+                artist=artist,
+                url=play_url,
+                source=source,
+                query=music_query,
+                candidates=candidates,
+            )
             HandlerLLM._set_music_player_active(context, True)
             HandlerLLM._mark_shared_music_status(context, "loading", "server_play_dispatched")
             output = DataBundle(output_definition)
@@ -2419,19 +2525,26 @@ class HandlerLLM(HandlerBase, ABC):
                 HandlerLLM._mark_shared_music_status(context, "loading", "server_control_replay")
             elif action == "resume":
                 HandlerLLM._mark_shared_music_status(context, "playing", "server_control_resume")
+        client_action = HandlerLLM._build_music_control_client_action(
+            context,
+            action,
+            delta=control.get("delta"),
+        )
         output = DataBundle(output_definition)
         output.set_main_data("")
-        output.add_meta("client_action", {
-            "type": "music.control",
-            "action": action,
-            "delta": control.get("delta"),
-            "hints": ["暂停", "继续", "重播", "下一首", "音量小一点"],
-        })
+        output.add_meta("client_action", client_action)
         streamer.stream_data(output)
-        logger.info(
-            f"Music client_action dispatch: type=music.control stream_key={stream_key} "
-            f"action={action} delta={control.get('delta')} active={context.music_player_active}"
-        )
+        if client_action.get("type") == "music.play":
+            logger.info(
+                f"Music replay compatibility dispatch: type=music.play stream_key={stream_key} "
+                f"title={client_action.get('title')!r} artist={client_action.get('artist')!r} "
+                f"url={_summarize_url_for_log(client_action.get('url') or '')}"
+            )
+        else:
+            logger.info(
+                f"Music client_action dispatch: type=music.control stream_key={stream_key} "
+                f"action={action} delta={control.get('delta')} active={context.music_player_active}"
+            )
         if action == "stop":
             context.emit_signal(
                 ChatSignal(

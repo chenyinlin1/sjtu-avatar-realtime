@@ -57,6 +57,7 @@ error
 | --- | --- | --- |
 | `pause` | `paused` | `pause_control` |
 | `resume` | `playing` | `resume_control` |
+| `replay` / `restart` | `playing` | `replay_control` |
 | `stop` | `stopped` | `stop_control` |
 | `next` | `ended` | `next_control` |
 | 控制失败 | `error` | `<action>_failed` |
@@ -68,6 +69,9 @@ error
 3. `payload.state` 必须是允许枚举之一。
 4. 播放失败或控制失败时发送 `state=error`，并尽量带上 `error` 字段。
 5. 服务端暂不要求 `MusicStatusAck`，音箱端发送后无需等待确认。
+
+为兼容尚未实现 `music.control/replay` 的音箱版本，服务端在保留了最近歌曲 URL 时，
+会把用户的重播请求转换成一次新的 `music.play` 下发。音箱端应按普通点歌流程替换当前音频并从头播放。
 
 ## 示例
 

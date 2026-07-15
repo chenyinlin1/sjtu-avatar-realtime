@@ -14,6 +14,7 @@ class SharedStates:
     client_endpoint: Optional[str] = None
     music_status: Optional[Dict] = None
     music_player_active: bool = False
+    last_music_track: Optional[Dict] = None
 
 
 class SessionContext(object):
