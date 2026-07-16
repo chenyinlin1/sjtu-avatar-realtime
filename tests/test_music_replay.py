@@ -1,3 +1,4 @@
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -8,6 +9,48 @@ from chat_engine.data_models.runtime_data.data_bundle import (
 )
 from handlers.agent.tools.music_control import MusicControlTool
 from handlers.llm.openai_compatible.llm_handler_openai_compatible import HandlerLLM
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "停下来吧，我不想听歌。",
+        "我不想再听歌了。",
+        "不想听这首歌了。",
+    ],
+)
+def test_natural_stop_phrases_are_normalized_to_stop(text):
+    assert HandlerLLM._extract_music_control(text) == {"action": "stop"}
+
+
+def test_stop_intent_is_forced_through_music_control_tool():
+    context = SimpleNamespace(
+        enable_tool_execution=True,
+        tool_choice="auto",
+        tool_schemas=[
+            {
+                "type": "function",
+                "function": {"name": "music_control"},
+            }
+        ],
+        music_player_active=True,
+        shared_states=SimpleNamespace(
+            music_player_active=True,
+            music_status={"state": "playing"},
+        ),
+    )
+    text = "停下来吧，我不想听歌。"
+    control = HandlerLLM._extract_music_control(text)
+
+    assert HandlerLLM._should_route_music_stop_through_tool(
+        context,
+        text,
+        control,
+    ) is True
+    assert HandlerLLM._tool_choice_for_turn(context, text) == {
+        "type": "function",
+        "function": {"name": "music_control"},
+    }
 
 
 @pytest.mark.parametrize(
@@ -194,3 +237,103 @@ def test_tool_replay_emits_music_play_for_speaker_compatibility():
     action = streamer.bundles[0].metadata["client_action"]
     assert action["type"] == "music.play"
     assert action["url"] == "https://example.com/love-transfer.mp3"
+
+
+def _avatar_text_definition():
+    definition = DataBundleDefinition()
+    definition.add_entry(DataBundleEntry.create_text_entry("avatar_text"))
+    return definition
+
+
+def _stop_context(*, ack_timeout=0.01):
+    return SimpleNamespace(
+        music_player_active=True,
+        output_texts="",
+        music_stop_ack_timeout_seconds=ack_timeout,
+        shared_states=SimpleNamespace(
+            music_status={
+                "state": "playing",
+                "received_at": time.time() - 1,
+            },
+            music_player_active=True,
+            last_music_track=None,
+        ),
+    )
+
+
+def _stop_tool_result():
+    return {
+        "name": "music_control",
+        "success": True,
+        "data": {
+            "type": "music.control",
+            "action": "stop",
+        },
+        "error": None,
+        "content": "{}",
+    }
+
+
+def test_stop_confirmation_is_emitted_only_after_client_stopped_ack():
+    context = _stop_context()
+    result = _stop_tool_result()
+
+    class AckingStreamer:
+        def __init__(self):
+            self.bundles = []
+
+        def stream_data(self, bundle, **_kwargs):
+            self.bundles.append(bundle)
+            action = bundle.metadata.get("client_action")
+            if action and action.get("action") == "stop":
+                context.shared_states.music_status = {
+                    "state": "stopped",
+                    "reason": "stop_control",
+                    "received_at": time.time(),
+                }
+                context.shared_states.music_player_active = False
+
+    streamer = AckingStreamer()
+    dispatched = HandlerLLM._dispatch_music_tool_results(
+        context,
+        [result],
+        _avatar_text_definition(),
+        streamer,
+        "stream-stop",
+        "停下来吧，我不想听歌。",
+    )
+
+    assert dispatched is True
+    assert streamer.bundles[0].metadata["client_action"]["action"] == "stop"
+    assert streamer.bundles[-1].get_main_data() == "已经停了。"
+    assert context.output_texts == "已经停了。"
+    assert result["success"] is True
+    assert result["data"]["client_confirmed"] is True
+
+
+def test_stop_timeout_never_claims_music_has_stopped():
+    context = _stop_context(ack_timeout=0)
+    result = _stop_tool_result()
+
+    class RecordingStreamer:
+        def __init__(self):
+            self.bundles = []
+
+        def stream_data(self, bundle, **_kwargs):
+            self.bundles.append(bundle)
+
+    streamer = RecordingStreamer()
+    dispatched = HandlerLLM._dispatch_music_tool_results(
+        context,
+        [result],
+        _avatar_text_definition(),
+        streamer,
+        "stream-stop-timeout",
+        "停下来吧，我不想听歌。",
+    )
+
+    assert dispatched is True
+    assert context.output_texts == "停止指令发出去了，但还没确认停下来。"
+    assert "已经停" not in context.output_texts
+    assert result["success"] is False
+    assert result["data"]["client_confirmed"] is False

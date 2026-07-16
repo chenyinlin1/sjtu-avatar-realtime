@@ -44,6 +44,8 @@ from handlers.agent.tools.reminder.pending_actions import close_pending_action_r
 
 MUSIC_ACTIVE_STATES = {"loading", "playing", "paused"}
 MUSIC_DIRECT_PAUSE_STATES = {"playing"}
+MUSIC_STOP_ACK_TIMEOUT_SECONDS = 1.5
+MUSIC_STOP_ACK_POLL_SECONDS = 0.02
 
 
 try:
@@ -511,7 +513,16 @@ class HandlerLLM(HandlerBase, ABC):
         )
         context.current_audit_turn_id = turn_id
         music_control = self._extract_music_control(chat_text)
-        if music_control and self._should_handle_music_control_direct(context, chat_text, music_control):
+        force_music_stop_tool = self._should_route_music_stop_through_tool(
+            context,
+            chat_text,
+            music_control,
+        )
+        if (
+            music_control
+            and self._should_handle_music_control_direct(context, chat_text, music_control)
+            and not force_music_stop_tool
+        ):
             logger.info(f"Music control detected by shared state route: {music_control}")
             audit_event(
                 context,
@@ -621,6 +632,11 @@ class HandlerLLM(HandlerBase, ABC):
             create_kwargs = self._build_completion_kwargs(context, messages, chat_text)
             tool_choice = create_kwargs.get("tool_choice")
             forced_reminder_turn = is_forced_reminder_choice(tool_choice)
+            forced_music_stop_turn = bool(
+                self._is_forced_tool_choice(tool_choice, "music_control")
+                and (self._extract_music_control(chat_text) or {}).get("action") == "stop"
+            )
+            suppress_pre_tool_text = forced_reminder_turn or forced_music_stop_turn
 
             audit_event(
                 context,
@@ -647,7 +663,7 @@ class HandlerLLM(HandlerBase, ABC):
                 output_definition,
                 streamer,
                 stream_key,
-                emit_text=not forced_reminder_turn,
+                emit_text=not suppress_pre_tool_text,
             )
             tool_trace["llm_need_tool"] = bool(tool_calls)
             tool_trace["tool_calls"] = self._clean_trace_tool_calls(tool_calls)
@@ -664,6 +680,29 @@ class HandlerLLM(HandlerBase, ABC):
                 stream_key=stream_key,
                 turn_id=turn_id,
             )
+            if forced_music_stop_turn and not cancelled and not tool_calls:
+                logger.warning(
+                    "LLM was forced to call music_control(stop) but returned no tool_calls: "
+                    f"user_text={chat_text[:120]!r}"
+                )
+                audit_event(
+                    context,
+                    "llm_tool_call_missing",
+                    stream_identity=inputs.stream_id,
+                    bind_stream_key=stream_key,
+                    turn_id=turn_id,
+                    llm_stage="main_response",
+                    model=context.model_name,
+                    expected_tool="music_control",
+                    expected_action="stop",
+                    output_text=full_text,
+                    user_text=chat_text,
+                )
+                fallback = "停止指令没能发出去，请再试一下。"
+                context.output_texts = fallback
+                output = DataBundle(output_definition)
+                output.set_main_data(fallback)
+                streamer.stream_data(output)
             if (
                 not cancelled
                 and not tool_calls
@@ -688,7 +727,7 @@ class HandlerLLM(HandlerBase, ABC):
             if not cancelled and tool_calls:
                 self._handle_tool_calls(
                     context,
-                    "" if forced_reminder_turn else full_text,
+                    "" if suppress_pre_tool_text else full_text,
                     tool_calls,
                     output_definition,
                     streamer,
@@ -705,7 +744,10 @@ class HandlerLLM(HandlerBase, ABC):
                     stream_key,
                     turn_id,
                 )
-                skip_feedback = self._should_skip_tool_feedback_response(context)
+                skip_feedback = (
+                    forced_music_stop_turn
+                    or self._should_skip_tool_feedback_response(context)
+                )
                 tool_trace["delivered_to_reply_generation"] = False
                 if feedback_ready and not skip_feedback:
                     context.output_texts = ''
@@ -725,9 +767,13 @@ class HandlerLLM(HandlerBase, ABC):
                         streamer.stream_data(output)
                 elif not context.output_texts:
                     fallback = (
-                        "我已经调用工具确认了，这一步的结果回传还在接入中。"
-                        if context.enable_tool_execution else
-                        "我需要调用工具确认一下，这一步还在接入中。"
+                        "停止指令没能执行，请再试一下。"
+                        if forced_music_stop_turn else
+                        (
+                            "我已经调用工具确认了，这一步的结果回传还在接入中。"
+                            if context.enable_tool_execution else
+                            "我需要调用工具确认一下，这一步还在接入中。"
+                        )
                     )
                     context.output_texts = fallback
                     output = DataBundle(output_definition)
@@ -950,6 +996,24 @@ class HandlerLLM(HandlerBase, ABC):
         return bool(
             music_control
             and HandlerLLM._should_handle_music_control_direct(context, user_text, music_control)
+        )
+
+    @staticmethod
+    def _should_route_music_stop_through_tool(
+        context: LLMContext,
+        user_text: str,
+        music_control: Optional[dict] = None,
+    ) -> bool:
+        if getattr(context, "tool_choice", None) == "none":
+            return False
+        if not getattr(context, "enable_tool_execution", False):
+            return False
+        if not HandlerLLM._has_tool_schema(context, "music_control"):
+            return False
+        control = music_control or HandlerLLM._extract_music_control(user_text)
+        return bool(
+            (control or {}).get("action") == "stop"
+            and HandlerLLM._should_handle_music_control_direct(context, user_text, control)
         )
 
     @staticmethod
@@ -1498,10 +1562,9 @@ class HandlerLLM(HandlerBase, ABC):
                 action = data.get("action")
                 if not action:
                     continue
-                if action == "stop":
-                    HandlerLLM._set_music_player_active(context, False)
-                    HandlerLLM._mark_shared_music_status(context, "stopped", "server_control_stop")
-                elif action in {"pause", "resume", "replay", "next", "volume", "mute", "unmute"}:
+                had_streamed_text = bool(context.output_texts)
+                stop_dispatched_at = time.time() if action == "stop" else None
+                if action in {"pause", "resume", "replay", "next", "volume", "mute", "unmute"}:
                     HandlerLLM._set_music_player_active(context, True)
                     if action == "pause":
                         HandlerLLM._mark_shared_music_status(context, "paused", "server_control_pause")
@@ -1532,19 +1595,64 @@ class HandlerLLM(HandlerBase, ABC):
                         f"action={action} delta={data.get('delta')} active={context.music_player_active} via=tool_call"
                     )
                 if action == "stop":
-                    context.emit_signal(
-                        ChatSignal(
-                            type=ChatSignalType.INTERRUPT,
-                            source_type=ChatSignalSourceType.HANDLER,
-                            source_name=context.owner or "LLMOpenAICompatible",
-                            signal_data={
-                                "reason": "music_stop",
-                                "trigger_text": (original_text or "")[:100],
-                            },
+                    if had_streamed_text:
+                        context.emit_signal(
+                            ChatSignal(
+                                type=ChatSignalType.INTERRUPT,
+                                source_type=ChatSignalSourceType.HANDLER,
+                                source_name=context.owner or "LLMOpenAICompatible",
+                                signal_data={
+                                    "reason": "music_stop",
+                                    "trigger_text": (original_text or "")[:100],
+                                },
+                            )
                         )
+                        logger.info(
+                            "Music stop emitted interrupt from tool_call to clear pre-tool avatar text"
+                        )
+
+                    stop_status = HandlerLLM._wait_for_music_stop_ack(
+                        context,
+                        stop_dispatched_at,
                     )
-                    logger.info("Music stop emitted interrupt from tool_call to clear pending avatar response streams")
-                if not context.output_texts:
+                    stop_confirmed = stop_status.get("state") == "stopped"
+                    data["client_confirmed"] = stop_confirmed
+                    if stop_status:
+                        data["music_status"] = stop_status
+                    result["data"] = data
+                    if stop_confirmed:
+                        HandlerLLM._set_music_player_active(context, False)
+                        result["success"] = True
+                        result["error"] = None
+                        result["content"] = HandlerLLM._json_tool_content(data)
+                    else:
+                        stop_error = HandlerLLM._music_stop_ack_error(stop_status)
+                        result["success"] = False
+                        result["error"] = stop_error
+                        result["content"] = HandlerLLM._json_tool_content({
+                            "error": stop_error,
+                            **data,
+                        })
+
+                    if had_streamed_text:
+                        context.output_texts = (
+                            "music.control:stop:confirmed"
+                            if stop_confirmed else
+                            "music.control:stop:unconfirmed"
+                        )
+                    else:
+                        reply = HandlerLLM._music_stop_ack_reply(stop_status)
+                        context.output_texts = reply
+                        reply_output = DataBundle(output_definition)
+                        reply_output.set_main_data(reply)
+                        streamer.stream_data(reply_output)
+                    logger.info(
+                        "Music stop acknowledgement: "
+                        f"stream_key={stream_key} confirmed={stop_confirmed} "
+                        f"state={stop_status.get('state') or '-'} "
+                        f"reason={stop_status.get('reason') or '-'}"
+                    )
+                elif not context.output_texts:
                     context.output_texts = f"music.control:{action}"
                 dispatched = True
                 continue
@@ -2216,6 +2324,46 @@ class HandlerLLM(HandlerBase, ABC):
         shared_states.music_status = status
 
     @staticmethod
+    def _wait_for_music_stop_ack(context, dispatched_at: float) -> dict:
+        try:
+            timeout = float(
+                getattr(context, "music_stop_ack_timeout_seconds", MUSIC_STOP_ACK_TIMEOUT_SECONDS)
+            )
+        except (TypeError, ValueError):
+            timeout = MUSIC_STOP_ACK_TIMEOUT_SECONDS
+        timeout = max(0.0, timeout)
+        deadline = time.monotonic() + timeout
+
+        while True:
+            status = HandlerLLM._get_shared_music_status(context)
+            state = str(status.get("state") or "").strip().lower()
+            try:
+                received_at = float(status.get("received_at") or 0)
+            except (TypeError, ValueError):
+                received_at = 0
+            if received_at >= dispatched_at and state in {"stopped", "error"}:
+                return status
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return {}
+            time.sleep(min(MUSIC_STOP_ACK_POLL_SECONDS, remaining))
+
+    @staticmethod
+    def _music_stop_ack_reply(status: dict) -> str:
+        state = str((status or {}).get("state") or "").strip().lower()
+        if state == "stopped":
+            return "已经停了。"
+        if state == "error":
+            return "停止没有成功，请再试一下。"
+        return "停止指令发出去了，但还没确认停下来。"
+
+    @staticmethod
+    def _music_stop_ack_error(status: dict) -> str:
+        if str((status or {}).get("state") or "").strip().lower() == "error":
+            return str((status or {}).get("error") or "Client reported music stop error")
+        return "Timed out waiting for MusicStatus=stopped"
+
+    @staticmethod
     def _should_handle_music_control_direct(context, text: str, control: dict) -> bool:
         action = (control or {}).get("action")
         if not action:
@@ -2253,6 +2401,10 @@ class HandlerLLM(HandlerBase, ABC):
                 "不要放了",
                 "不要播放了",
                 "不听了",
+                "不想听歌",
+                "不想再听歌",
+                "不想听音乐",
+                "不想听这首歌",
             )
         )
 
@@ -2290,6 +2442,10 @@ class HandlerLLM(HandlerBase, ABC):
     "莫放音乐了",
     "不播了",
     "不听歌了",
+    "不想听歌",
+    "不想再听歌",
+    "不想听音乐",
+    "不想听这首歌",
     "歌不听了",
     "这歌不听了",
     "这首歌不听了",
@@ -2514,10 +2670,8 @@ class HandlerLLM(HandlerBase, ABC):
         if stream_key:
             context.active_stream_keys.add(stream_key)
         action = control.get("action")
-        if action == "stop":
-            HandlerLLM._set_music_player_active(context, False)
-            HandlerLLM._mark_shared_music_status(context, "stopped", "server_control_stop")
-        elif action in {"pause", "resume", "replay", "next", "volume", "mute", "unmute"}:
+        stop_dispatched_at = time.time() if action == "stop" else None
+        if action in {"pause", "resume", "replay", "next", "volume", "mute", "unmute"}:
             HandlerLLM._set_music_player_active(context, True)
             if action == "pause":
                 HandlerLLM._mark_shared_music_status(context, "paused", "server_control_pause")
@@ -2545,21 +2699,25 @@ class HandlerLLM(HandlerBase, ABC):
                 f"Music client_action dispatch: type=music.control stream_key={stream_key} "
                 f"action={action} delta={control.get('delta')} active={context.music_player_active}"
             )
+        reply = f"music.control:{action}"
         if action == "stop":
-            context.emit_signal(
-                ChatSignal(
-                    type=ChatSignalType.INTERRUPT,
-                    source_type=ChatSignalSourceType.HANDLER,
-                    source_name=context.owner or "LLMOpenAICompatible",
-                    signal_data={
-                        "reason": "music_stop",
-                        "trigger_text": original_text[:100],
-                    },
-                )
+            stop_status = HandlerLLM._wait_for_music_stop_ack(
+                context,
+                stop_dispatched_at,
             )
-            logger.info("Music stop emitted interrupt to clear pending avatar response streams")
+            if stop_status.get("state") == "stopped":
+                HandlerLLM._set_music_player_active(context, False)
+            reply = HandlerLLM._music_stop_ack_reply(stop_status)
+            reply_output = DataBundle(output_definition)
+            reply_output.set_main_data(reply)
+            streamer.stream_data(reply_output)
+            logger.info(
+                "Direct music stop acknowledgement: "
+                f"stream_key={stream_key} confirmed={stop_status.get('state') == 'stopped'} "
+                f"state={stop_status.get('state') or '-'}"
+            )
         context.history.add_message(HistoryMessage(role="human", content=original_text))
-        context.history.add_message(HistoryMessage(role="avatar", content=f"music.control:{action}"))
+        context.history.add_message(HistoryMessage(role="avatar", content=reply))
         context.input_texts = ""
         context.output_texts = ""
         if stream_key:
